@@ -6,7 +6,6 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 
-// Standalone AWG helper based on the server-side logic from inc/VpnClient.php.
 // Important: here clientId means AWG clientId from clientsTable, which for AWG equals the peer public key.
 
 data class AwgConnection(

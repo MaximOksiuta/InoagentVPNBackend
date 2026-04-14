@@ -6,14 +6,16 @@ import java.sql.Connection
 import java.sql.DriverManager
 
 class DatabaseFactory(
-    private val databasePath: Path = Path.of("data", "app.db")
+    databasePath: String
 ) {
+    private val databasePath: Path = Path.of(databasePath)
+
     init {
         Class.forName("org.sqlite.JDBC")
     }
 
     fun initialize() {
-        Files.createDirectories(databasePath.parent)
+        databasePath.parent?.let { Files.createDirectories(it) }
         connection().use { connection ->
             connection.createStatement().use { statement ->
                 statement.executeUpdate(

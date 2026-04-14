@@ -11,6 +11,7 @@ data class User(
 
 interface UserRepository {
     fun createUser(email: String, passwordHash: String): User?
+    fun findByEmail(email: String): User?
 }
 
 class SqliteUserRepository(
@@ -50,6 +51,32 @@ class SqliteUserRepository(
                         null
                     } else {
                         throw exception
+                    }
+                }
+            }
+        }
+    }
+
+    override fun findByEmail(email: String): User? {
+        val sql = """
+            SELECT id, email, password_hash
+            FROM users
+            WHERE email = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.setString(1, email)
+                statement.executeQuery().use { resultSet ->
+                    if (!resultSet.next()) {
+                        null
+                    } else {
+                        User(
+                            id = resultSet.getLong("id"),
+                            email = resultSet.getString("email"),
+                            passwordHash = resultSet.getString("password_hash")
+                        )
                     }
                 }
             }
