@@ -16,7 +16,6 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.auth.Authentication
-import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.jwt.JWTPrincipal
 import io.ktor.server.auth.jwt.jwt
 import io.ktor.server.auth.principal
@@ -86,8 +85,8 @@ fun Application.module(
             realm = appConfig.jwt.realm
             verifier(jwtService.verifier)
             validate { credential ->
-                val email = credential.payload.getClaim("email").asString()
-                if (email.isNullOrBlank()) null else JWTPrincipal(credential.payload)
+                val phone = credential.payload.getClaim("phone").asString()
+                if (phone.isNullOrBlank()) null else JWTPrincipal(credential.payload)
             }
         }
     }
@@ -134,7 +133,7 @@ fun Application.module(
 
         route("/api/auth") {
             post("/register", {
-                description = "Register a new user with email and password"
+                description = "Register a new user with phone, password and optional telegram id"
                 request {
                     body<RegisterRequest> {
                         description = "Registration payload"
@@ -155,7 +154,7 @@ fun Application.module(
                         }
                     }
                     code(HttpStatusCode.Conflict) {
-                        description = "User with this email already exists"
+                        description = "User with this phone already exists"
                         body<ErrorResponse> {
                             description = "Conflict error payload"
                         }
@@ -163,18 +162,19 @@ fun Application.module(
                 }
             }) {
                 val request = call.receive<RegisterRequest>()
-                validateRegistrationCredentials(request.email, request.password)
+                validateRegistrationCredentials(request.phone, request.password)
 
-                val normalizedEmail = request.email.trim().lowercase()
+                val normalizedPhone = normalizePhone(request.phone)
                 val createdUser = userRepository.createUser(
-                    email = normalizedEmail,
+                    phone = normalizedPhone,
+                    telegramId = request.telegramId,
                     passwordHash = BCrypt.hashpw(request.password, BCrypt.gensalt())
                 )
 
                 if (createdUser == null) {
                     call.respond(
                         HttpStatusCode.Conflict,
-                        ErrorResponse("User with this email already exists")
+                        ErrorResponse("User with this phone already exists")
                     )
                     return@post
                 }
@@ -183,13 +183,14 @@ fun Application.module(
                     HttpStatusCode.Created,
                     RegisterResponse(
                         id = createdUser.id,
-                        email = createdUser.email
+                        phone = createdUser.phone,
+                        telegramId = createdUser.telegramId
                     )
                 )
             }
 
             post("/login", {
-                description = "Login with email and password to get JWT token"
+                description = "Login with phone and password to get JWT token"
                 request {
                     body<LoginRequest> {
                         description = "Login payload"
@@ -210,7 +211,7 @@ fun Application.module(
                         }
                     }
                     code(HttpStatusCode.Unauthorized) {
-                        description = "Invalid email or password"
+                        description = "Invalid phone or password"
                         body<ErrorResponse> {
                             description = "Unauthorized error payload"
                         }
@@ -218,12 +219,12 @@ fun Application.module(
                 }
             }) {
                 val request = call.receive<LoginRequest>()
-                validateLoginCredentials(request.email, request.password)
+                validateLoginCredentials(request.phone, request.password)
 
-                val normalizedEmail = request.email.trim().lowercase()
-                val user = userRepository.findByEmail(normalizedEmail)
+                val normalizedPhone = normalizePhone(request.phone)
+                val user = userRepository.findByPhone(normalizedPhone)
                 if (user == null || !BCrypt.checkpw(request.password, user.passwordHash)) {
-                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid email or password"))
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid phone or password"))
                     return@post
                 }
 
@@ -238,64 +239,63 @@ fun Application.module(
                 )
             }
 
-            authenticate(AUTH_JWT) {
-                get("/me", {
-                    description = "Get current user by JWT token"
-                    securitySchemeNames("bearerAuth")
-                    response {
-                        code(HttpStatusCode.OK) {
-                            description = "Current authenticated user"
-                            body<CurrentUserResponse> {
-                                description = "Authenticated user payload"
-                            }
-                        }
-                        code(HttpStatusCode.Unauthorized) {
-                            description = "Missing or invalid token"
-                            body<ErrorResponse> {
-                                description = "Unauthorized error payload"
-                            }
+            get("/me", {
+                description = "Get current user by JWT token or super key headers"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Current authenticated user"
+                        body<CurrentUserResponse> {
+                            description = "Authenticated user payload"
                         }
                     }
-                }) {
-                    val principal = call.principal<JWTPrincipal>()
-                    val userId = principal?.payload?.getClaim("userId")?.asLong()
-                    val email = principal?.payload?.getClaim("email")?.asString()
-
-                    if (userId == null || email.isNullOrBlank()) {
-                        call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid token"))
-                        return@get
+                    code(HttpStatusCode.Unauthorized) {
+                        description = "Missing or invalid credentials"
+                        body<ErrorResponse> {
+                            description = "Unauthorized error payload"
+                        }
                     }
-
-                    call.respond(
-                        HttpStatusCode.OK,
-                        CurrentUserResponse(
-                            id = userId,
-                            email = email
-                        )
-                    )
                 }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@get
+                }
+
+                call.respond(
+                    HttpStatusCode.OK,
+                    CurrentUserResponse(
+                        id = user.id,
+                        phone = user.phone,
+                        telegramId = user.telegramId
+                    )
+                )
             }
         }
     }
 }
 
-private fun validateRegistrationCredentials(email: String, password: String) {
-    require(email.isNotBlank()) { "Email must not be blank" }
-    require(EMAIL_REGEX.matches(email.trim())) { "Email format is invalid" }
+private fun validateRegistrationCredentials(phone: String, password: String) {
+    require(phone.isNotBlank()) { "Phone must not be blank" }
+    require(PHONE_REGEX.matches(normalizePhone(phone))) { "Phone format is invalid" }
     require(password.length >= 8) { "Password must be at least 8 characters long" }
 }
 
-private fun validateLoginCredentials(email: String, password: String) {
-    require(email.isNotBlank()) { "Email must not be blank" }
-    require(EMAIL_REGEX.matches(email.trim())) { "Email format is invalid" }
+private fun validateLoginCredentials(phone: String, password: String) {
+    require(phone.isNotBlank()) { "Phone must not be blank" }
+    require(PHONE_REGEX.matches(normalizePhone(phone))) { "Phone format is invalid" }
     require(password.isNotBlank()) { "Password must not be blank" }
 }
 
-private val EMAIL_REGEX = Regex("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$")
+private fun normalizePhone(phone: String): String = phone.trim()
+
+private val PHONE_REGEX = Regex("^\\+[1-9][0-9]{10,14}$")
 
 data class AppConfig(
     val databasePath: String,
-    val jwt: JwtConfig
+    val jwt: JwtConfig,
+    val superKey: String
 ) {
     companion object {
         fun from(config: io.ktor.server.config.ApplicationConfig): AppConfig {
@@ -311,7 +311,8 @@ data class AppConfig(
                     audience = config.property("security.jwt.audience").getString(),
                     realm = config.property("security.jwt.realm").getString(),
                     expiresInMs = config.property("security.jwt.expiresInMs").getString().toLong()
-                )
+                ),
+                superKey = config.propertyOrNull("security.super.key")?.getString().orEmpty()
             )
         }
     }
@@ -341,7 +342,7 @@ class JwtService(
             .withIssuer(jwtConfig.issuer)
             .withAudience(jwtConfig.audience)
             .withClaim("userId", user.id)
-            .withClaim("email", user.email)
+            .withClaim("phone", user.phone)
             .withIssuedAt(Date(now))
             .withExpiresAt(Date(now + jwtConfig.expiresInMs))
             .sign(algorithm)
@@ -350,19 +351,21 @@ class JwtService(
 
 @Serializable
 data class RegisterRequest(
-    val email: String,
-    val password: String
+    val phone: String,
+    val password: String,
+    val telegramId: Long? = null
 )
 
 @Serializable
 data class RegisterResponse(
     val id: Long,
-    val email: String
+    val phone: String,
+    val telegramId: Long?
 )
 
 @Serializable
 data class LoginRequest(
-    val email: String,
+    val phone: String,
     val password: String
 )
 
@@ -376,7 +379,8 @@ data class AuthTokenResponse(
 @Serializable
 data class CurrentUserResponse(
     val id: Long,
-    val email: String
+    val phone: String,
+    val telegramId: Long?
 )
 
 @Serializable
@@ -388,3 +392,39 @@ data class ErrorResponse(
 data class HealthResponse(
     val status: String
 )
+
+private suspend fun authenticateCurrentUser(
+    call: io.ktor.server.application.ApplicationCall,
+    userRepository: UserRepository,
+    jwtService: JwtService,
+    appConfig: AppConfig
+): User? {
+    val superKey = call.request.headers["X-Super-Key"]
+    val phoneFromHeader = call.request.headers["X-Phone"]?.let(::normalizePhone)
+
+    if (!superKey.isNullOrBlank() || !phoneFromHeader.isNullOrBlank()) {
+        if (superKey.isNullOrBlank() || phoneFromHeader.isNullOrBlank()) {
+            return null
+        }
+        if (appConfig.superKey.isBlank() || superKey != appConfig.superKey) {
+            return null
+        }
+        return userRepository.findByPhone(phoneFromHeader)
+    }
+
+    val principal = call.principal<JWTPrincipal>()
+    if (principal != null) {
+        val phone = principal.payload.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
+        return userRepository.findByPhone(phone)
+    }
+
+    val bearerToken = call.request.headers["Authorization"]
+        ?.removePrefix("Bearer ")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
+
+    val decoded = runCatching { jwtService.verifier.verify(bearerToken) }.getOrNull() ?: return null
+    val phone = decoded.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
+    return userRepository.findByPhone(phone)
+}
