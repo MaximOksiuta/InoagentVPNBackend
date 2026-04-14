@@ -68,7 +68,7 @@ class AuthApiTest {
         }
         assertEquals(HttpStatusCode.OK, meResponse.status)
         assertEquals(
-            CurrentUserResponse(id = 1L, phone = "+79991234567", telegramId = 123L),
+            CurrentUserResponse(id = 1L, phone = "+79991234567", telegramId = 123L, isAdmin = false),
             meResponse.body()
         )
     }
@@ -110,7 +110,56 @@ class AuthApiTest {
 
         assertEquals(HttpStatusCode.OK, meResponse.status)
         assertEquals(
-            CurrentUserResponse(id = 1L, phone = "+79991112233", telegramId = null),
+            CurrentUserResponse(id = 1L, phone = "+79991112233", telegramId = null, isAdmin = false),
+            meResponse.body()
+        )
+    }
+
+    @Test
+    fun `me returns isAdmin for admin user`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79991110000", password = "strongpass123", telegramId = null))
+        }
+        val user = userRepository.findByPhone("+79991110000")!!
+        userRepository.updateIsAdmin(user.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79991110000", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val meResponse = client.get("/api/auth/me") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.OK, meResponse.status)
+        assertEquals(
+            CurrentUserResponse(id = 1L, phone = "+79991110000", telegramId = null, isAdmin = true),
             meResponse.body()
         )
     }
@@ -401,6 +450,101 @@ class AuthApiTest {
                 configs = listOf(generatedConfig)
             ),
             detailsResponse.body()
+        )
+    }
+
+    @Test
+    fun `cannot generate config twice for same device and server`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val fakeGenerator = object : DeviceConfigGenerator {
+            override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
+                return GeneratedDeviceConfig(
+                    clientId = "duplicate-client-id",
+                    config = "generated-config"
+                )
+            }
+        }
+
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig,
+                deviceConfigGenerator = fakeGenerator
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000066", password = "strongpass123", telegramId = null))
+        }
+        val user = userRepository.findByPhone("+79990000066")!!
+        userRepository.updateIsAdmin(user.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000066", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val serverResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Dup Server",
+                    location = "Tallinn",
+                    host = "192.0.2.11",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/test",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        val createdServer = serverResponse.body<ServerResponse>()
+
+        val deviceResponse = client.post("/api/devices") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(CreateDeviceRequest(name = "Galaxy"))
+        }
+        val createdDevice = deviceResponse.body<DeviceResponse>()
+
+        val firstGenerate = client.post("/api/devices/${createdDevice.id}/configs/generate") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(GenerateDeviceConfigRequest(serverId = createdServer.id))
+        }
+        assertEquals(HttpStatusCode.OK, firstGenerate.status)
+
+        val secondGenerate = client.post("/api/devices/${createdDevice.id}/configs/generate") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(GenerateDeviceConfigRequest(serverId = createdServer.id))
+        }
+        assertEquals(HttpStatusCode.Conflict, secondGenerate.status)
+        assertEquals(
+            """{"message":"Config for this device and server already exists"}""",
+            secondGenerate.bodyAsText()
         )
     }
 

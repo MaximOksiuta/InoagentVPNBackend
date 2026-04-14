@@ -14,6 +14,8 @@ import io.github.smiley4.ktorswaggerui.dsl.routing.route
 import io.github.smiley4.ktorswaggerui.routing.openApiSpec
 import io.github.smiley4.ktorswaggerui.routing.swaggerUI
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.server.application.Application
 import io.ktor.server.application.call
 import io.ktor.server.application.install
@@ -23,6 +25,7 @@ import io.ktor.server.auth.jwt.jwt
 import io.ktor.server.auth.principal
 import io.ktor.server.netty.EngineMain
 import io.ktor.server.plugins.callloging.CallLogging
+import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
@@ -73,6 +76,19 @@ fun Application.module(
     deviceConfigGenerator: DeviceConfigGenerator = AwgDeviceConfigGenerator()
 ) {
     install(CallLogging)
+    install(CORS) {
+        anyHost()
+        allowMethod(HttpMethod.Options)
+        allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Post)
+        allowMethod(HttpMethod.Put)
+        allowMethod(HttpMethod.Delete)
+        allowHeader(HttpHeaders.Authorization)
+        allowHeader(HttpHeaders.ContentType)
+        allowHeader("X-Super-Key")
+        allowHeader("X-Phone")
+        allowNonSimpleContentTypes = true
+    }
     install(ContentNegotiation) {
         json()
     }
@@ -286,7 +302,8 @@ fun Application.module(
                     CurrentUserResponse(
                         id = user.id,
                         phone = user.phone,
-                        telegramId = user.telegramId
+                        telegramId = user.telegramId,
+                        isAdmin = user.isAdmin
                     )
                 )
             }
@@ -521,6 +538,15 @@ fun Application.module(
                 val server = serverRepository.findServer(request.serverId)
                 if (server == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@post
+                }
+
+                val existingConfig = deviceServerRepository.findByDeviceAndServer(device.id, server.id)
+                if (existingConfig != null) {
+                    call.respond(
+                        HttpStatusCode.Conflict,
+                        ErrorResponse("Config for this device and server already exists")
+                    )
                     return@post
                 }
 
@@ -842,7 +868,8 @@ data class AuthTokenResponse(
 data class CurrentUserResponse(
     val id: Long,
     val phone: String,
-    val telegramId: Long?
+    val telegramId: Long?,
+    val isAdmin: Boolean
 )
 
 @Serializable

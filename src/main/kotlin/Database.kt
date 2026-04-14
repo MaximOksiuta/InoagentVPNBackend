@@ -59,7 +59,7 @@ class DatabaseFactory(
             }
         }
 
-        createDevicesTable(connection)
+        ensureDevicesTable(connection)
         ensureDeviceServersTable(connection)
     }
 
@@ -92,6 +92,37 @@ class DatabaseFactory(
         }
     }
 
+    private fun ensureDevicesTable(connection: Connection) {
+        val columns = mutableSetOf<String>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info(devices)").use { resultSet ->
+                while (resultSet.next()) {
+                    columns += resultSet.getString("name")
+                }
+            }
+        }
+
+        when {
+            columns.isEmpty() -> createDevicesTable(connection)
+            "config" in columns -> {
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate("ALTER TABLE devices RENAME TO devices_legacy")
+                }
+                createDevicesTable(connection)
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate(
+                        """
+                        INSERT INTO devices(id, user_id, name, created_at, updated_at)
+                        SELECT id, user_id, name, created_at, updated_at
+                        FROM devices_legacy
+                        """.trimIndent()
+                    )
+                    statement.executeUpdate("DROP TABLE devices_legacy")
+                }
+            }
+        }
+    }
+
     private fun createDevicesTable(connection: Connection) {
         connection.createStatement().use { statement ->
             statement.executeUpdate(
@@ -118,10 +149,18 @@ class DatabaseFactory(
                 }
             }
         }
+        val foreignKeyTables = mutableSetOf<String>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA foreign_key_list(device_servers)").use { resultSet ->
+                while (resultSet.next()) {
+                    foreignKeyTables += resultSet.getString("table")
+                }
+            }
+        }
 
         when {
             columns.isEmpty() -> createDeviceServersTable(connection)
-            "id" !in columns -> {
+            "id" !in columns || "devices" !in foreignKeyTables || "devices_legacy" in foreignKeyTables -> {
                 connection.createStatement().use { statement ->
                     statement.executeUpdate("ALTER TABLE device_servers RENAME TO device_servers_legacy")
                 }
