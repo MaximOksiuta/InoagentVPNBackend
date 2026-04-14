@@ -47,15 +47,17 @@ fun Application.module() {
     databaseFactory.initialize()
     val userRepository = SqliteUserRepository(databaseFactory)
     val deviceRepository = SqliteDeviceRepository(databaseFactory)
+    val deviceServerRepository = SqliteDeviceServerRepository(databaseFactory)
     val serverRepository = SqliteServerRepository(databaseFactory)
     val jwtService = JwtService(appConfig.jwt)
 
-    module(userRepository, deviceRepository, serverRepository, jwtService, appConfig)
+    module(userRepository, deviceRepository, deviceServerRepository, serverRepository, jwtService, appConfig)
 }
 
 fun Application.module(
     userRepository: UserRepository,
     deviceRepository: DeviceRepository,
+    deviceServerRepository: DeviceServerRepository,
     serverRepository: ServerRepository,
     jwtService: JwtService,
     appConfig: AppConfig
@@ -306,7 +308,7 @@ fun Application.module(
                 }
 
                 call.respond(
-                    deviceRepository.listDevices(user.id).map { it.toResponse() }
+                    deviceRepository.listDevices(user.id).map { device -> device.toSummaryResponse() }
                 )
             }
 
@@ -335,14 +337,13 @@ fun Application.module(
                 }
 
                 val request = call.receive<CreateDeviceRequest>()
-                validateDevicePayload(request.name, request.config)
+                validateDevicePayload(request.name)
 
                 val device = deviceRepository.createDevice(
                     userId = user.id,
-                    name = request.name.trim(),
-                    config = request.config
+                    name = request.name.trim()
                 )
-                call.respond(HttpStatusCode.Created, device.toResponse())
+                call.respond(HttpStatusCode.Created, device.toSummaryResponse())
             }
 
             get("/{deviceId}", {
@@ -351,7 +352,7 @@ fun Application.module(
                 response {
                     code(HttpStatusCode.OK) {
                         description = "Requested device"
-                        body<DeviceResponse> {
+                        body<DeviceDetailsResponse> {
                             description = "Device details"
                         }
                     }
@@ -376,7 +377,12 @@ fun Application.module(
                     return@get
                 }
 
-                call.respond(device.toResponse())
+                call.respond(
+                    device.toDetailsResponse(
+                        links = deviceServerRepository.listByDevice(device.id),
+                        serverRepository = serverRepository
+                    )
+                )
             }
 
             put("/{deviceId}", {
@@ -391,7 +397,7 @@ fun Application.module(
                 response {
                     code(HttpStatusCode.OK) {
                         description = "Updated device"
-                        body<DeviceResponse> {
+                        body<DeviceDetailsResponse> {
                             description = "Updated device payload"
                         }
                     }
@@ -411,20 +417,24 @@ fun Application.module(
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
                 val request = call.receive<UpdateDeviceRequest>()
-                validateDevicePayload(request.name, request.config)
+                validateDevicePayload(request.name)
 
                 val updated = deviceRepository.updateDevice(
                     userId = user.id,
                     deviceId = deviceId,
-                    name = request.name.trim(),
-                    config = request.config
+                    name = request.name.trim()
                 )
                 if (updated == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@put
                 }
 
-                call.respond(updated.toResponse())
+                call.respond(
+                    updated.toDetailsResponse(
+                        links = deviceServerRepository.listByDevice(updated.id),
+                        serverRepository = serverRepository
+                    )
+                )
             }
 
             delete("/{deviceId}", {
@@ -622,10 +632,9 @@ private fun validateLoginCredentials(phone: String, password: String) {
     require(password.isNotBlank()) { "Password must not be blank" }
 }
 
-private fun validateDevicePayload(name: String, config: String) {
+private fun validateDevicePayload(name: String) {
     require(name.isNotBlank()) { "Device name must not be blank" }
     require(name.trim().length <= 255) { "Device name must not exceed 255 characters" }
-    require(config.isNotBlank()) { "Device config must not be blank" }
 }
 
 private fun parseDeviceId(rawDeviceId: String?): Long {
@@ -746,20 +755,33 @@ data class CurrentUserResponse(
 
 @Serializable
 data class CreateDeviceRequest(
-    val name: String,
-    val config: String
+    val name: String
 )
 
 @Serializable
 data class UpdateDeviceRequest(
-    val name: String,
-    val config: String
+    val name: String
 )
 
 @Serializable
 data class DeviceResponse(
     val id: Long,
+    val name: String
+)
+
+@Serializable
+data class DeviceDetailsResponse(
+    val id: Long,
     val name: String,
+    val configs: List<DeviceServerResponse>
+)
+
+@Serializable
+data class DeviceServerResponse(
+    val id: Long,
+    val serverId: Long,
+    val serverName: String,
+    val serverLocation: String,
     val config: String
 )
 
@@ -856,10 +878,32 @@ private suspend fun authenticateAdmin(
     return user
 }
 
-private fun Device.toResponse(): DeviceResponse {
+private fun Device.toSummaryResponse(): DeviceResponse {
     return DeviceResponse(
         id = id,
+        name = name
+    )
+}
+
+private fun Device.toDetailsResponse(
+    links: List<DeviceServerConfig>,
+    serverRepository: ServerRepository
+): DeviceDetailsResponse {
+    return DeviceDetailsResponse(
+        id = id,
         name = name,
+        configs = links.map { it.toResponse(serverRepository) }
+    )
+}
+
+private fun DeviceServerConfig.toResponse(serverRepository: ServerRepository): DeviceServerResponse {
+    val server = serverRepository.findServer(serverId)
+        ?: error("Server with id=$serverId was not found for device-server config id=$id")
+    return DeviceServerResponse(
+        id = id,
+        serverId = serverId,
+        serverName = server.name,
+        serverLocation = server.location,
         config = config
     )
 }

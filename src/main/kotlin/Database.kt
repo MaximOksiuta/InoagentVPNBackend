@@ -23,7 +23,11 @@ class DatabaseFactory(
     }
 
     fun connection(): Connection {
-        return DriverManager.getConnection("jdbc:sqlite:${databasePath.toAbsolutePath()}")
+        return DriverManager.getConnection("jdbc:sqlite:${databasePath.toAbsolutePath()}").also { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("PRAGMA foreign_keys = ON")
+            }
+        }
     }
 
     private fun ensureUsersTable(connection: Connection) {
@@ -56,6 +60,7 @@ class DatabaseFactory(
         }
 
         createDevicesTable(connection)
+        ensureDeviceServersTable(connection)
     }
 
     private fun userTableColumns(connection: Connection): MutableSet<String> {
@@ -95,10 +100,60 @@ class DatabaseFactory(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
-                    config TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+        }
+    }
+
+    private fun ensureDeviceServersTable(connection: Connection) {
+        val columns = mutableSetOf<String>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info(device_servers)").use { resultSet ->
+                while (resultSet.next()) {
+                    columns += resultSet.getString("name")
+                }
+            }
+        }
+
+        when {
+            columns.isEmpty() -> createDeviceServersTable(connection)
+            "id" !in columns -> {
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate("ALTER TABLE device_servers RENAME TO device_servers_legacy")
+                }
+                createDeviceServersTable(connection)
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate(
+                        """
+                        INSERT INTO device_servers(id, device_id, server_id, config, created_at, updated_at)
+                        SELECT rowid, device_id, server_id, config, created_at, updated_at
+                        FROM device_servers_legacy
+                        """.trimIndent()
+                    )
+                    statement.executeUpdate("DROP TABLE device_servers_legacy")
+                }
+            }
+        }
+    }
+
+    private fun createDeviceServersTable(connection: Connection) {
+        connection.createStatement().use { statement ->
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS device_servers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id INTEGER NOT NULL,
+                    server_id INTEGER NOT NULL,
+                    config TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (device_id, server_id),
+                    FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                 )
                 """.trimIndent()
             )

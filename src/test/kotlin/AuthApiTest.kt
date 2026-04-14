@@ -35,6 +35,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
@@ -84,6 +85,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
@@ -125,6 +127,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
@@ -143,17 +146,20 @@ class AuthApiTest {
     }
 
     @Test
-    fun `device crud flow works for current user only`() = testApplication {
+    fun `device crud flow works with server configs for current user only`() = testApplication {
         environment {
             config = MapApplicationConfig()
         }
         val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val deviceServerRepository = SqliteDeviceServerRepository(databaseFactory)
         application {
-            val databaseFactory = DatabaseFactory(appConfig.databasePath)
-            databaseFactory.initialize()
             module(
-                userRepository = SqliteUserRepository(databaseFactory),
+                userRepository = userRepository,
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = deviceServerRepository,
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
@@ -170,12 +176,35 @@ class AuthApiTest {
             contentType(ContentType.Application.Json)
             setBody(RegisterRequest(phone = "+79990000001", password = "strongpass123", telegramId = 11L))
         }
+        val firstUser = userRepository.findByPhone("+79990000001")!!
+        userRepository.updateIsAdmin(firstUser.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
             setBody(LoginRequest(phone = "+79990000001", password = "strongpass123"))
         }
         val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val createServerResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Main Server",
+                    location = "Warsaw",
+                    host = "10.0.0.1",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/main",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        assertEquals(HttpStatusCode.Created, createServerResponse.status)
+        val createdServer = createServerResponse.body<ServerResponse>()
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
@@ -185,33 +214,74 @@ class AuthApiTest {
         val createResponse = client.post("/api/devices") {
             header(HttpHeaders.Authorization, "Bearer $token")
             contentType(ContentType.Application.Json)
-            setBody(CreateDeviceRequest(name = "iPhone", config = "[Interface]\nPrivateKey=abc"))
+            setBody(CreateDeviceRequest(name = "iPhone"))
         }
         assertEquals(HttpStatusCode.Created, createResponse.status)
         val createdDevice = createResponse.body<DeviceResponse>()
         assertEquals("iPhone", createdDevice.name)
-        assertEquals("[Interface]\nPrivateKey=abc", createdDevice.config)
+        assertEquals(DeviceResponse(id = createdDevice.id, name = "iPhone"), createdDevice)
+
+        val deviceServerConfig = deviceServerRepository.upsert(
+            createdDevice.id,
+            createdServer.id,
+            "[Interface]\nPrivateKey=abc"
+        )
 
         val listResponse = client.get("/api/devices") {
             header(HttpHeaders.Authorization, "Bearer $token")
         }
         assertEquals(HttpStatusCode.OK, listResponse.status)
-        assertEquals(listOf(createdDevice), listResponse.body())
+        assertEquals(
+            listOf(
+                DeviceResponse(
+                    id = createdDevice.id,
+                    name = "iPhone"
+                )
+            ),
+            listResponse.body()
+        )
 
         val getResponse = client.get("/api/devices/${createdDevice.id}") {
             header(HttpHeaders.Authorization, "Bearer $token")
         }
         assertEquals(HttpStatusCode.OK, getResponse.status)
-        assertEquals(createdDevice, getResponse.body())
+        assertEquals(
+            DeviceDetailsResponse(
+                id = createdDevice.id,
+                name = "iPhone",
+                configs = listOf(
+                    DeviceServerResponse(
+                        id = deviceServerConfig.id,
+                        serverId = createdServer.id,
+                        serverName = "Main Server",
+                        serverLocation = "Warsaw",
+                        config = "[Interface]\nPrivateKey=abc"
+                    )
+                )
+            ),
+            getResponse.body()
+        )
 
         val updateResponse = client.put("/api/devices/${createdDevice.id}") {
             header(HttpHeaders.Authorization, "Bearer $token")
             contentType(ContentType.Application.Json)
-            setBody(UpdateDeviceRequest(name = "MacBook", config = "updated config text"))
+            setBody(UpdateDeviceRequest(name = "MacBook"))
         }
         assertEquals(HttpStatusCode.OK, updateResponse.status)
         assertEquals(
-            DeviceResponse(id = createdDevice.id, name = "MacBook", config = "updated config text"),
+            DeviceDetailsResponse(
+                id = createdDevice.id,
+                name = "MacBook",
+                configs = listOf(
+                    DeviceServerResponse(
+                        id = deviceServerConfig.id,
+                        serverId = createdServer.id,
+                        serverName = "Main Server",
+                        serverLocation = "Warsaw",
+                        config = "[Interface]\nPrivateKey=abc"
+                    )
+                )
+            ),
             updateResponse.body()
         )
 
@@ -244,6 +314,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
@@ -288,6 +359,7 @@ class AuthApiTest {
             module(
                 userRepository = userRepository,
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig

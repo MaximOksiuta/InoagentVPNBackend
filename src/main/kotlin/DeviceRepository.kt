@@ -5,15 +5,14 @@ import java.sql.Statement
 data class Device(
     val id: Long,
     val userId: Long,
-    val name: String,
-    val config: String
+    val name: String
 )
 
 interface DeviceRepository {
-    fun createDevice(userId: Long, name: String, config: String): Device
+    fun createDevice(userId: Long, name: String): Device
     fun listDevices(userId: Long): List<Device>
     fun findDevice(userId: Long, deviceId: Long): Device?
-    fun updateDevice(userId: Long, deviceId: Long, name: String, config: String): Device?
+    fun updateDevice(userId: Long, deviceId: Long, name: String): Device?
     fun deleteDevice(userId: Long, deviceId: Long): Boolean
 }
 
@@ -21,17 +20,16 @@ class SqliteDeviceRepository(
     private val databaseFactory: DatabaseFactory
 ) : DeviceRepository {
 
-    override fun createDevice(userId: Long, name: String, config: String): Device {
+    override fun createDevice(userId: Long, name: String): Device {
         val sql = """
-            INSERT INTO devices(user_id, name, config)
-            VALUES(?, ?, ?)
+            INSERT INTO devices(user_id, name)
+            VALUES(?, ?)
         """.trimIndent()
 
         return databaseFactory.connection().use { connection ->
             connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS).use { statement ->
                 statement.setLong(1, userId)
                 statement.setString(2, name)
-                statement.setString(3, config)
                 statement.executeUpdate()
 
                 statement.generatedKeys.use { generatedKeys ->
@@ -39,8 +37,7 @@ class SqliteDeviceRepository(
                     Device(
                         id = generatedKeys.getLong(1),
                         userId = userId,
-                        name = name,
-                        config = config
+                        name = name
                     )
                 }
             }
@@ -49,7 +46,7 @@ class SqliteDeviceRepository(
 
     override fun listDevices(userId: Long): List<Device> {
         val sql = """
-            SELECT id, user_id, name, config
+            SELECT id, user_id, name
             FROM devices
             WHERE user_id = ?
             ORDER BY id ASC
@@ -71,7 +68,7 @@ class SqliteDeviceRepository(
 
     override fun findDevice(userId: Long, deviceId: Long): Device? {
         val sql = """
-            SELECT id, user_id, name, config
+            SELECT id, user_id, name
             FROM devices
             WHERE user_id = ? AND id = ?
             LIMIT 1
@@ -88,19 +85,18 @@ class SqliteDeviceRepository(
         }
     }
 
-    override fun updateDevice(userId: Long, deviceId: Long, name: String, config: String): Device? {
+    override fun updateDevice(userId: Long, deviceId: Long, name: String): Device? {
         val sql = """
             UPDATE devices
-            SET name = ?, config = ?, updated_at = CURRENT_TIMESTAMP
+            SET name = ?, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = ? AND id = ?
         """.trimIndent()
 
         return databaseFactory.connection().use { connection ->
             connection.prepareStatement(sql).use { statement ->
                 statement.setString(1, name)
-                statement.setString(2, config)
-                statement.setLong(3, userId)
-                statement.setLong(4, deviceId)
+                statement.setLong(2, userId)
+                statement.setLong(3, deviceId)
                 val updatedRows = statement.executeUpdate()
                 if (updatedRows == 0) null else findDevice(userId, deviceId)
             }
@@ -126,8 +122,7 @@ class SqliteDeviceRepository(
         return Device(
             id = getLong("id"),
             userId = getLong("user_id"),
-            name = getString("name"),
-            config = getString("config")
+            name = getString("name")
         )
     }
 }
