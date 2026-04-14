@@ -47,14 +47,16 @@ fun Application.module() {
     databaseFactory.initialize()
     val userRepository = SqliteUserRepository(databaseFactory)
     val deviceRepository = SqliteDeviceRepository(databaseFactory)
+    val serverRepository = SqliteServerRepository(databaseFactory)
     val jwtService = JwtService(appConfig.jwt)
 
-    module(userRepository, deviceRepository, jwtService, appConfig)
+    module(userRepository, deviceRepository, serverRepository, jwtService, appConfig)
 }
 
 fun Application.module(
     userRepository: UserRepository,
     deviceRepository: DeviceRepository,
+    serverRepository: ServerRepository,
     jwtService: JwtService,
     appConfig: AppConfig
 ) {
@@ -456,6 +458,155 @@ fun Application.module(
                 call.response.status(HttpStatusCode.NoContent)
             }
         }
+
+        route("/api/servers") {
+            get("", {
+                description = "List all servers, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Server list"
+                        body<List<ServerResponse>> {
+                            description = "All configured servers"
+                        }
+                    }
+                    code(HttpStatusCode.Forbidden) {
+                        description = "Admin access required"
+                        body<ErrorResponse> {
+                            description = "Forbidden error payload"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
+                call.respond(serverRepository.listServers().map { it.toResponse() })
+            }
+
+            post("", {
+                description = "Create a server, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                request {
+                    body<UpsertServerRequest> {
+                        description = "Server payload"
+                        required = true
+                    }
+                }
+                response {
+                    code(HttpStatusCode.Created) {
+                        description = "Server created"
+                        body<ServerResponse> {
+                            description = "Created server"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@post
+                val request = call.receive<UpsertServerRequest>()
+                validateServerPayload(request)
+
+                val server = serverRepository.createServer(
+                    name = request.name.trim(),
+                    location = request.location.trim(),
+                    connection = request.toAwgConnection()
+                )
+                call.respond(HttpStatusCode.Created, server.toResponse())
+            }
+
+            get("/{serverId}", {
+                description = "Get one server, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Requested server"
+                        body<ServerResponse> {
+                            description = "Server details"
+                        }
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Server not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
+                val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
+                val server = serverRepository.findServer(serverId)
+                if (server == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@get
+                }
+                call.respond(server.toResponse())
+            }
+
+            put("/{serverId}", {
+                description = "Update one server, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                request {
+                    body<UpsertServerRequest> {
+                        description = "Updated server payload"
+                        required = true
+                    }
+                }
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Updated server"
+                        body<ServerResponse> {
+                            description = "Updated server payload"
+                        }
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Server not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@put
+                val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
+                val request = call.receive<UpsertServerRequest>()
+                validateServerPayload(request)
+
+                val updated = serverRepository.updateServer(
+                    serverId = serverId,
+                    name = request.name.trim(),
+                    location = request.location.trim(),
+                    connection = request.toAwgConnection()
+                )
+                if (updated == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@put
+                }
+                call.respond(updated.toResponse())
+            }
+
+            delete("/{serverId}", {
+                description = "Delete one server, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.NoContent) {
+                        description = "Server deleted"
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Server not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@delete
+                val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
+                val deleted = serverRepository.deleteServer(serverId)
+                if (!deleted) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@delete
+                }
+                call.response.status(HttpStatusCode.NoContent)
+            }
+        }
     }
 }
 
@@ -478,9 +629,24 @@ private fun validateDevicePayload(name: String, config: String) {
 }
 
 private fun parseDeviceId(rawDeviceId: String?): Long {
-    val deviceId = rawDeviceId?.toLongOrNull()
-    require(deviceId != null && deviceId > 0) { "Device id must be a positive number" }
-    return deviceId
+    return parsePositiveId(rawDeviceId, "Device id")
+}
+
+private fun parsePositiveId(rawValue: String?, label: String): Long {
+    val parsed = rawValue?.toLongOrNull()
+    require(parsed != null && parsed > 0) { "$label must be a positive number" }
+    return parsed
+}
+
+private fun validateServerPayload(request: UpsertServerRequest) {
+    require(request.name.isNotBlank()) { "Server name must not be blank" }
+    require(request.location.isNotBlank()) { "Server location must not be blank" }
+    require(request.host.isNotBlank()) { "Server host must not be blank" }
+    require(request.port in 1..65535) { "Server port must be between 1 and 65535" }
+    require(request.username.isNotBlank()) { "Server username must not be blank" }
+    require(request.containerName.isNotBlank()) { "Server containerName must not be blank" }
+    require(request.containerConfigDir.isNotBlank()) { "Server containerConfigDir must not be blank" }
+    require(request.interfaceName.isNotBlank()) { "Server interfaceName must not be blank" }
 }
 
 private fun normalizePhone(phone: String): String = phone.trim()
@@ -598,6 +764,35 @@ data class DeviceResponse(
 )
 
 @Serializable
+data class UpsertServerRequest(
+    val name: String,
+    val location: String,
+    val host: String,
+    val port: Int = 22,
+    val username: String,
+    val password: String? = null,
+    val sshKeyPath: String? = null,
+    val containerName: String = "amnezia-awg2",
+    val containerConfigDir: String = "/opt/amnezia/awg",
+    val interfaceName: String = "awg0"
+)
+
+@Serializable
+data class ServerResponse(
+    val id: Long,
+    val name: String,
+    val location: String,
+    val host: String,
+    val port: Int,
+    val username: String,
+    val password: String?,
+    val sshKeyPath: String?,
+    val containerName: String,
+    val containerConfigDir: String,
+    val interfaceName: String
+)
+
+@Serializable
 data class ErrorResponse(
     val message: String
 )
@@ -643,10 +838,57 @@ private suspend fun authenticateCurrentUser(
     return userRepository.findByPhone(phone)
 }
 
+private suspend fun authenticateAdmin(
+    call: io.ktor.server.application.ApplicationCall,
+    userRepository: UserRepository,
+    jwtService: JwtService,
+    appConfig: AppConfig
+): User? {
+    val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+    if (user == null) {
+        call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+        return null
+    }
+    if (!user.isAdmin) {
+        call.respond(HttpStatusCode.Forbidden, ErrorResponse("Admin access required"))
+        return null
+    }
+    return user
+}
+
 private fun Device.toResponse(): DeviceResponse {
     return DeviceResponse(
         id = id,
         name = name,
         config = config
+    )
+}
+
+private fun UpsertServerRequest.toAwgConnection(): AwgConnection {
+    return AwgConnection(
+        host = host.trim(),
+        port = port,
+        username = username.trim(),
+        password = password,
+        sshKeyPath = sshKeyPath,
+        containerName = containerName.trim(),
+        containerConfigDir = containerConfigDir.trim(),
+        interfaceName = interfaceName.trim()
+    )
+}
+
+private fun Server.toResponse(): ServerResponse {
+    return ServerResponse(
+        id = id,
+        name = name,
+        location = location,
+        host = connection.host,
+        port = connection.port,
+        username = connection.username,
+        password = connection.password,
+        sshKeyPath = connection.sshKeyPath,
+        containerName = connection.containerName,
+        containerConfigDir = connection.containerConfigDir,
+        interfaceName = connection.interfaceName
     )
 }

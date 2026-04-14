@@ -35,6 +35,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
             )
@@ -83,6 +84,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
             )
@@ -123,6 +125,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
             )
@@ -151,6 +154,7 @@ class AuthApiTest {
             module(
                 userRepository = SqliteUserRepository(databaseFactory),
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
                 appConfig = appConfig
             )
@@ -223,6 +227,167 @@ class AuthApiTest {
         assertEquals(HttpStatusCode.NoContent, deleteResponse.status)
 
         val afterDelete = client.get("/api/devices/${createdDevice.id}") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.NotFound, afterDelete.status)
+    }
+
+    @Test
+    fun `non admin cannot access servers crud`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        application {
+            val databaseFactory = DatabaseFactory(appConfig.databasePath)
+            databaseFactory.initialize()
+            module(
+                userRepository = SqliteUserRepository(databaseFactory),
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000101", password = "strongpass123", telegramId = null))
+        }
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000101", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val response = client.get("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.Forbidden, response.status)
+        assertEquals("""{"message":"Admin access required"}""", response.bodyAsText())
+    }
+
+    @Test
+    fun `admin can manage servers`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000111", password = "strongpass123", telegramId = 1L))
+        }
+        val adminUser = userRepository.findByPhone("+79990000111")!!
+        userRepository.updateIsAdmin(adminUser.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000111", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val createResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Main Server",
+                    location = "Frankfurt",
+                    host = "1.2.3.4",
+                    port = 2222,
+                    username = "root",
+                    password = "secret",
+                    sshKeyPath = "/keys/id_rsa",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        assertEquals(HttpStatusCode.Created, createResponse.status)
+        val createdServer = createResponse.body<ServerResponse>()
+
+        val listResponse = client.get("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.OK, listResponse.status)
+        assertEquals(listOf(createdServer), listResponse.body())
+
+        val getResponse = client.get("/api/servers/${createdServer.id}") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.OK, getResponse.status)
+        assertEquals(createdServer, getResponse.body())
+
+        val updateResponse = client.put("/api/servers/${createdServer.id}") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Backup Server",
+                    location = "Amsterdam",
+                    host = "5.6.7.8",
+                    port = 22,
+                    username = "admin",
+                    password = null,
+                    sshKeyPath = "/keys/admin_rsa",
+                    containerName = "awg-prod",
+                    containerConfigDir = "/srv/awg",
+                    interfaceName = "awg1"
+                )
+            )
+        }
+        assertEquals(HttpStatusCode.OK, updateResponse.status)
+        assertEquals(
+            ServerResponse(
+                id = createdServer.id,
+                name = "Backup Server",
+                location = "Amsterdam",
+                host = "5.6.7.8",
+                port = 22,
+                username = "admin",
+                password = null,
+                sshKeyPath = "/keys/admin_rsa",
+                containerName = "awg-prod",
+                containerConfigDir = "/srv/awg",
+                interfaceName = "awg1"
+            ),
+            updateResponse.body()
+        )
+
+        val deleteResponse = client.delete("/api/servers/${createdServer.id}") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.NoContent, deleteResponse.status)
+
+        val afterDelete = client.get("/api/servers/${createdServer.id}") {
             header(HttpHeaders.Authorization, "Bearer $token")
         }
         assertEquals(HttpStatusCode.NotFound, afterDelete.status)
