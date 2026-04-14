@@ -1,5 +1,11 @@
 package org.example
 
+import io.github.smiley4.ktorswaggerui.SwaggerUI
+import io.github.smiley4.ktorswaggerui.dsl.routing.get
+import io.github.smiley4.ktorswaggerui.dsl.routing.post
+import io.github.smiley4.ktorswaggerui.dsl.routing.route
+import io.github.smiley4.ktorswaggerui.routing.openApiSpec
+import io.github.smiley4.ktorswaggerui.routing.swaggerUI
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
@@ -12,9 +18,6 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
-import io.ktor.server.routing.get
-import io.ktor.server.routing.post
-import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.serialization.Serializable
 import org.mindrot.jbcrypt.BCrypt
@@ -34,6 +37,13 @@ fun Application.module(userRepository: UserRepository) {
     install(ContentNegotiation) {
         json()
     }
+    install(SwaggerUI) {
+        info {
+            title = "Auth API"
+            version = "1.0.0"
+            description = "API for registering users by email and password"
+        }
+    }
     install(StatusPages) {
         exception<IllegalArgumentException> { call, cause ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse(cause.message ?: "Invalid request"))
@@ -45,12 +55,64 @@ fun Application.module(userRepository: UserRepository) {
     }
 
     routing {
-        get("/health") {
+        route("/api.json") {
+            openApiSpec()
+        }
+
+        route("/swagger") {
+            swaggerUI("/api.json")
+        }
+
+        get("/health", {
+            description = "Health check endpoint"
+            response {
+                code(HttpStatusCode.OK) {
+                    description = "Service is available"
+                    body<HealthResponse> {
+                        description = "Health response payload"
+                    }
+                }
+            }
+        }) {
             call.respond(HealthResponse(status = "ok"))
         }
 
         route("/api/auth") {
-            post("/register") {
+            post("/register", {
+                description = "Register a new user with email and password"
+                request {
+                    body<RegisterRequest> {
+                        description = "Registration payload"
+                        required = true
+                    }
+                }
+                response {
+                    code(HttpStatusCode.Created) {
+                        description = "User created successfully"
+                        body<RegisterResponse> {
+                            description = "Created user payload"
+                        }
+                    }
+                    code(HttpStatusCode.BadRequest) {
+                        description = "Validation error"
+                        body<ErrorResponse> {
+                            description = "Validation error payload"
+                        }
+                    }
+                    code(HttpStatusCode.Conflict) {
+                        description = "User with this email already exists"
+                        body<ErrorResponse> {
+                            description = "Conflict error payload"
+                        }
+                    }
+                    code(HttpStatusCode.InternalServerError) {
+                        description = "Unexpected server error"
+                        body<ErrorResponse> {
+                            description = "Internal server error payload"
+                        }
+                    }
+                }
+            }) {
                 val request = call.receive<RegisterRequest>()
                 validateRegisterRequest(request)
 
