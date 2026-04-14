@@ -23,7 +23,9 @@ data class AwgUser(
     val clientId: String,
     val name: String,
     val clientIp: String? = null,
-    val creationDate: String? = null
+    val creationDate: String? = null,
+    val userId: Long? = null,
+    val deviceId: Long? = null
 )
 
 data class AwgCreatedUser(
@@ -49,7 +51,9 @@ class AwgServerScripts(private val connection: AwgConnection) {
     private data class ClientsTableEntry(
         val clientId: String,
         val clientName: String,
-        val creationDate: String?
+        val creationDate: String?,
+        val userId: Long?,
+        val deviceId: Long?
     )
 
     private data class ServerState(
@@ -72,12 +76,14 @@ class AwgServerScripts(private val connection: AwgConnection) {
                 clientId = entry.clientId,
                 name = entry.clientName,
                 clientIp = ipByPublicKey[entry.clientId],
-                creationDate = entry.creationDate
+                creationDate = entry.creationDate,
+                userId = entry.userId,
+                deviceId = entry.deviceId
             )
         }
     }
 
-    fun addUser(name: String): AwgCreatedUser {
+    fun addUser(name: String, userId: Long? = null, deviceId: Long? = null): AwgCreatedUser {
         require(name.isNotBlank()) { "name must not be blank" }
 
         val state = readServerState()
@@ -104,7 +110,9 @@ class AwgServerScripts(private val connection: AwgConnection) {
         val updatedTable = state.clientsTable + ClientsTableEntry(
             clientId = keys.second,
             clientName = name,
-            creationDate = java.util.Date().toString()
+            creationDate = java.util.Date().toString(),
+            userId = userId,
+            deviceId = deviceId
         )
         writeClientsTable(updatedTable)
         reloadWireGuard()
@@ -308,7 +316,7 @@ class AwgServerScripts(private val connection: AwgConnection) {
 
         val entries = mutableListOf<ClientsTableEntry>()
         val pattern = Regex(
-            """\{\s*"clientId"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"userData"\s*:\s*\{\s*"clientName"\s*:\s*"((?:\\.|[^"\\])*)"(?:\s*,\s*"creationDate"\s*:\s*"((?:\\.|[^"\\])*)")?""",
+            """\{\s*"clientId"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"userData"\s*:\s*\{\s*"clientName"\s*:\s*"((?:\\.|[^"\\])*)"(?:\s*,\s*"creationDate"\s*:\s*"((?:\\.|[^"\\])*)")?(?:\s*,\s*"userId"\s*:\s*(\d+))?(?:\s*,\s*"deviceId"\s*:\s*(\d+))?""",
             setOf(RegexOption.DOT_MATCHES_ALL)
         )
 
@@ -316,7 +324,9 @@ class AwgServerScripts(private val connection: AwgConnection) {
             entries += ClientsTableEntry(
                 clientId = jsonUnescape(match.groupValues[1]),
                 clientName = jsonUnescape(match.groupValues[2]),
-                creationDate = match.groupValues.getOrNull(3)?.takeIf { it.isNotEmpty() }?.let(::jsonUnescape)
+                creationDate = match.groupValues.getOrNull(3)?.takeIf { it.isNotEmpty() }?.let(::jsonUnescape),
+                userId = match.groupValues.getOrNull(4)?.takeIf { it.isNotEmpty() }?.toLong(),
+                deviceId = match.groupValues.getOrNull(5)?.takeIf { it.isNotEmpty() }?.toLong()
             )
         }
 
@@ -333,10 +343,19 @@ class AwgServerScripts(private val connection: AwgConnection) {
                 append("      \"clientName\": \"").append(jsonEscape(entry.clientName)).append("\"")
                 if (!entry.creationDate.isNullOrBlank()) {
                     append(",\n")
-                    append("      \"creationDate\": \"").append(jsonEscape(entry.creationDate)).append("\"\n")
-                } else {
-                    append('\n')
                 }
+                if (!entry.creationDate.isNullOrBlank()) {
+                    append("      \"creationDate\": \"").append(jsonEscape(entry.creationDate)).append("\"")
+                }
+                if (entry.userId != null) {
+                    if (!entry.creationDate.isNullOrBlank()) append(",\n") else append(",\n")
+                    append("      \"userId\": ").append(entry.userId)
+                }
+                if (entry.deviceId != null) {
+                    if (!entry.creationDate.isNullOrBlank() || entry.userId != null) append(",\n") else append(",\n")
+                    append("      \"deviceId\": ").append(entry.deviceId)
+                }
+                append('\n')
                 append("    }\n")
                 append("  }")
                 if (index != entries.lastIndex) append(',')

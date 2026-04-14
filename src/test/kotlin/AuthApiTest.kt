@@ -303,16 +303,119 @@ class AuthApiTest {
     }
 
     @Test
-    fun `non admin cannot access servers crud`() = testApplication {
+    fun `device config can be generated saved and returned`() = testApplication {
         environment {
             config = MapApplicationConfig()
         }
         val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val fakeGenerator = object : DeviceConfigGenerator {
+            override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
+                return GeneratedDeviceConfig(
+                    clientId = "fake-client-id",
+                    config = "[Interface]\nPrivateKey=fake\n# ${server.name} ${user.id} ${device.id}"
+                )
+            }
+        }
+
         application {
-            val databaseFactory = DatabaseFactory(appConfig.databasePath)
-            databaseFactory.initialize()
             module(
-                userRepository = SqliteUserRepository(databaseFactory),
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig,
+                deviceConfigGenerator = fakeGenerator
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000055", password = "strongpass123", telegramId = null))
+        }
+        val user = userRepository.findByPhone("+79990000055")!!
+        userRepository.updateIsAdmin(user.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000055", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val serverResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Generator Server",
+                    location = "Riga",
+                    host = "192.0.2.10",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/test",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        val createdServer = serverResponse.body<ServerResponse>()
+
+        val deviceResponse = client.post("/api/devices") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(CreateDeviceRequest(name = "Pixel"))
+        }
+        val createdDevice = deviceResponse.body<DeviceResponse>()
+
+        val generateResponse = client.post("/api/devices/${createdDevice.id}/configs/generate") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(GenerateDeviceConfigRequest(serverId = createdServer.id))
+        }
+        assertEquals(HttpStatusCode.OK, generateResponse.status)
+        val generatedConfig = generateResponse.body<DeviceServerResponse>()
+        assertEquals(createdServer.id, generatedConfig.serverId)
+        assertEquals("Generator Server", generatedConfig.serverName)
+        assertEquals("Riga", generatedConfig.serverLocation)
+        assertEquals("[Interface]\nPrivateKey=fake\n# Generator Server ${user.id} ${createdDevice.id}", generatedConfig.config)
+
+        val detailsResponse = client.get("/api/devices/${createdDevice.id}") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.OK, detailsResponse.status)
+        assertEquals(
+            DeviceDetailsResponse(
+                id = createdDevice.id,
+                name = "Pixel",
+                configs = listOf(generatedConfig)
+            ),
+            detailsResponse.body()
+        )
+    }
+
+    @Test
+    fun `non admin can view limited servers list but cannot manage servers`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        application {
+            module(
+                userRepository = userRepository,
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
                 deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
@@ -329,6 +432,39 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000100", password = "strongpass123", telegramId = null))
+        }
+        val adminUser = userRepository.findByPhone("+79990000100")!!
+        userRepository.updateIsAdmin(adminUser.id, true)
+
+        val adminLoginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000100", password = "strongpass123"))
+        }
+        val adminToken = adminLoginResponse.body<AuthTokenResponse>().accessToken
+
+        val adminCreateServerResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $adminToken")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Public Server",
+                    location = "Helsinki",
+                    host = "203.0.113.1",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/pub",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        assertEquals(HttpStatusCode.Created, adminCreateServerResponse.status)
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
             setBody(RegisterRequest(phone = "+79990000101", password = "strongpass123", telegramId = null))
         }
 
@@ -341,8 +477,38 @@ class AuthApiTest {
         val response = client.get("/api/servers") {
             header(HttpHeaders.Authorization, "Bearer $token")
         }
-        assertEquals(HttpStatusCode.Forbidden, response.status)
-        assertEquals("""{"message":"Admin access required"}""", response.bodyAsText())
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(
+            listOf(
+                ServerListItemResponse(
+                    id = 1L,
+                    name = "Public Server",
+                    location = "Helsinki"
+                )
+            ),
+            response.body()
+        )
+
+        val forbiddenCreate = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Blocked Server",
+                    location = "Oslo",
+                    host = "203.0.113.2",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/blocked",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        assertEquals(HttpStatusCode.Forbidden, forbiddenCreate.status)
+        assertEquals("""{"message":"Admin access required"}""", forbiddenCreate.bodyAsText())
     }
 
     @Test
@@ -410,7 +576,16 @@ class AuthApiTest {
             header(HttpHeaders.Authorization, "Bearer $token")
         }
         assertEquals(HttpStatusCode.OK, listResponse.status)
-        assertEquals(listOf(createdServer), listResponse.body())
+        assertEquals(
+            listOf(
+                ServerListItemResponse(
+                    id = createdServer.id,
+                    name = createdServer.name,
+                    location = createdServer.location
+                )
+            ),
+            listResponse.body()
+        )
 
         val getResponse = client.get("/api/servers/${createdServer.id}") {
             header(HttpHeaders.Authorization, "Bearer $token")

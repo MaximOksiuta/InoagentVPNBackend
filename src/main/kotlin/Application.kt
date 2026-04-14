@@ -50,8 +50,17 @@ fun Application.module() {
     val deviceServerRepository = SqliteDeviceServerRepository(databaseFactory)
     val serverRepository = SqliteServerRepository(databaseFactory)
     val jwtService = JwtService(appConfig.jwt)
+    val deviceConfigGenerator = AwgDeviceConfigGenerator()
 
-    module(userRepository, deviceRepository, deviceServerRepository, serverRepository, jwtService, appConfig)
+    module(
+        userRepository,
+        deviceRepository,
+        deviceServerRepository,
+        serverRepository,
+        jwtService,
+        appConfig,
+        deviceConfigGenerator
+    )
 }
 
 fun Application.module(
@@ -60,7 +69,8 @@ fun Application.module(
     deviceServerRepository: DeviceServerRepository,
     serverRepository: ServerRepository,
     jwtService: JwtService,
-    appConfig: AppConfig
+    appConfig: AppConfig,
+    deviceConfigGenerator: DeviceConfigGenerator = AwgDeviceConfigGenerator()
 ) {
     install(CallLogging)
     install(ContentNegotiation) {
@@ -467,29 +477,88 @@ fun Application.module(
 
                 call.response.status(HttpStatusCode.NoContent)
             }
-        }
 
-        route("/api/servers") {
-            get("", {
-                description = "List all servers, available only to administrators"
+            post("/{deviceId}/configs/generate", {
+                description = "Generate and save config for the current user's device on a selected server"
                 securitySchemeNames("bearerAuth")
+                request {
+                    body<GenerateDeviceConfigRequest> {
+                        description = "Server selection for config generation"
+                        required = true
+                    }
+                }
                 response {
                     code(HttpStatusCode.OK) {
-                        description = "Server list"
-                        body<List<ServerResponse>> {
-                            description = "All configured servers"
+                        description = "Generated and saved config"
+                        body<DeviceServerResponse> {
+                            description = "Generated config payload"
                         }
                     }
-                    code(HttpStatusCode.Forbidden) {
-                        description = "Admin access required"
+                    code(HttpStatusCode.NotFound) {
+                        description = "Device or server not found"
                         body<ErrorResponse> {
-                            description = "Forbidden error payload"
+                            description = "Not found error payload"
                         }
                     }
                 }
             }) {
-                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
-                call.respond(serverRepository.listServers().map { it.toResponse() })
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@post
+                }
+
+                val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val device = deviceRepository.findDevice(user.id, deviceId)
+                if (device == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@post
+                }
+
+                val request = call.receive<GenerateDeviceConfigRequest>()
+                require(request.serverId > 0) { "Server id must be a positive number" }
+
+                val server = serverRepository.findServer(request.serverId)
+                if (server == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@post
+                }
+
+                val generated = deviceConfigGenerator.generate(server, user, device)
+                val saved = deviceServerRepository.upsert(
+                    deviceId = device.id,
+                    serverId = server.id,
+                    config = generated.config
+                )
+                call.respond(saved.toResponse(server))
+            }
+        }
+
+        route("/api/servers") {
+            get("", {
+                description = "List servers for authenticated users"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Server list"
+                        body<List<ServerListItemResponse>> {
+                            description = "Server names and locations"
+                        }
+                    }
+                    code(HttpStatusCode.Unauthorized) {
+                        description = "Missing or invalid credentials"
+                        body<ErrorResponse> {
+                            description = "Unauthorized error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@get
+                }
+                call.respond(serverRepository.listServers().map { it.toListItemResponse() })
             }
 
             post("", {
@@ -719,6 +788,29 @@ class JwtService(
     }
 }
 
+data class GeneratedDeviceConfig(
+    val clientId: String,
+    val config: String
+)
+
+interface DeviceConfigGenerator {
+    fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig
+}
+
+class AwgDeviceConfigGenerator : DeviceConfigGenerator {
+    override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
+        val created = AwgServerScripts(server.connection).addUser(
+            name = device.name,
+            userId = user.id,
+            deviceId = device.id
+        )
+        return GeneratedDeviceConfig(
+            clientId = created.clientId,
+            config = created.config
+        )
+    }
+}
+
 @Serializable
 data class RegisterRequest(
     val phone: String,
@@ -770,6 +862,11 @@ data class DeviceResponse(
 )
 
 @Serializable
+data class GenerateDeviceConfigRequest(
+    val serverId: Long
+)
+
+@Serializable
 data class DeviceDetailsResponse(
     val id: Long,
     val name: String,
@@ -812,6 +909,13 @@ data class ServerResponse(
     val containerName: String,
     val containerConfigDir: String,
     val interfaceName: String
+)
+
+@Serializable
+data class ServerListItemResponse(
+    val id: Long,
+    val name: String,
+    val location: String
 )
 
 @Serializable
@@ -899,6 +1003,10 @@ private fun Device.toDetailsResponse(
 private fun DeviceServerConfig.toResponse(serverRepository: ServerRepository): DeviceServerResponse {
     val server = serverRepository.findServer(serverId)
         ?: error("Server with id=$serverId was not found for device-server config id=$id")
+    return toResponse(server)
+}
+
+private fun DeviceServerConfig.toResponse(server: Server): DeviceServerResponse {
     return DeviceServerResponse(
         id = id,
         serverId = serverId,
@@ -934,5 +1042,13 @@ private fun Server.toResponse(): ServerResponse {
         containerName = connection.containerName,
         containerConfigDir = connection.containerConfigDir,
         interfaceName = connection.interfaceName
+    )
+}
+
+private fun Server.toListItemResponse(): ServerListItemResponse {
+    return ServerListItemResponse(
+        id = id,
+        name = name,
+        location = location
     )
 }
