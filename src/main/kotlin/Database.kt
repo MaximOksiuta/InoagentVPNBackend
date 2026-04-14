@@ -49,6 +49,8 @@ class DatabaseFactory(
                 }
             }
         }
+
+        createDevicesTable(connection)
     }
 
     private fun createUsersTable(connection: Connection) {
@@ -61,6 +63,24 @@ class DatabaseFactory(
                     telegram_id INTEGER,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """.trimIndent()
+            )
+        }
+    }
+
+    private fun createDevicesTable(connection: Connection) {
+        connection.createStatement().use { statement ->
+            statement.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS devices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    config TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
                 """.trimIndent()
             )

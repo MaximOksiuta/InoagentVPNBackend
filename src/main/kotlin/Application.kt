@@ -6,8 +6,10 @@ import io.github.smiley4.ktorswaggerui.SwaggerUI
 import io.github.smiley4.ktorswaggerui.data.AuthKeyLocation
 import io.github.smiley4.ktorswaggerui.data.AuthScheme
 import io.github.smiley4.ktorswaggerui.data.AuthType
+import io.github.smiley4.ktorswaggerui.dsl.routing.delete
 import io.github.smiley4.ktorswaggerui.dsl.routing.get
 import io.github.smiley4.ktorswaggerui.dsl.routing.post
+import io.github.smiley4.ktorswaggerui.dsl.routing.put
 import io.github.smiley4.ktorswaggerui.dsl.routing.route
 import io.github.smiley4.ktorswaggerui.routing.openApiSpec
 import io.github.smiley4.ktorswaggerui.routing.swaggerUI
@@ -44,13 +46,15 @@ fun Application.module() {
     val databaseFactory = DatabaseFactory(appConfig.databasePath)
     databaseFactory.initialize()
     val userRepository = SqliteUserRepository(databaseFactory)
+    val deviceRepository = SqliteDeviceRepository(databaseFactory)
     val jwtService = JwtService(appConfig.jwt)
 
-    module(userRepository, jwtService, appConfig)
+    module(userRepository, deviceRepository, jwtService, appConfig)
 }
 
 fun Application.module(
     userRepository: UserRepository,
+    deviceRepository: DeviceRepository,
     jwtService: JwtService,
     appConfig: AppConfig
 ) {
@@ -66,9 +70,9 @@ fun Application.module(
                 path != listOf("swagger/")
         }
         info {
-            title = "Auth API"
+            title = "Auth and Devices API"
             version = "1.2.0"
-            description = "API for registration, login and JWT-based authorization"
+            description = "API for authentication and user device management"
         }
         security {
             securityScheme("bearerAuth") {
@@ -273,6 +277,185 @@ fun Application.module(
                 )
             }
         }
+
+        route("/api/devices") {
+            get("", {
+                description = "List devices of the current user"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "User devices"
+                        body<List<DeviceResponse>> {
+                            description = "List of devices"
+                        }
+                    }
+                    code(HttpStatusCode.Unauthorized) {
+                        description = "Missing or invalid credentials"
+                        body<ErrorResponse> {
+                            description = "Unauthorized error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@get
+                }
+
+                call.respond(
+                    deviceRepository.listDevices(user.id).map { it.toResponse() }
+                )
+            }
+
+            post("", {
+                description = "Create a new device for the current user"
+                securitySchemeNames("bearerAuth")
+                request {
+                    body<CreateDeviceRequest> {
+                        description = "Device payload"
+                        required = true
+                    }
+                }
+                response {
+                    code(HttpStatusCode.Created) {
+                        description = "Device created"
+                        body<DeviceResponse> {
+                            description = "Created device"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@post
+                }
+
+                val request = call.receive<CreateDeviceRequest>()
+                validateDevicePayload(request.name, request.config)
+
+                val device = deviceRepository.createDevice(
+                    userId = user.id,
+                    name = request.name.trim(),
+                    config = request.config
+                )
+                call.respond(HttpStatusCode.Created, device.toResponse())
+            }
+
+            get("/{deviceId}", {
+                description = "Get one device of the current user"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Requested device"
+                        body<DeviceResponse> {
+                            description = "Device details"
+                        }
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Device not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@get
+                }
+
+                val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val device = deviceRepository.findDevice(user.id, deviceId)
+                if (device == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@get
+                }
+
+                call.respond(device.toResponse())
+            }
+
+            put("/{deviceId}", {
+                description = "Update one device of the current user"
+                securitySchemeNames("bearerAuth")
+                request {
+                    body<UpdateDeviceRequest> {
+                        description = "Updated device payload"
+                        required = true
+                    }
+                }
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Updated device"
+                        body<DeviceResponse> {
+                            description = "Updated device payload"
+                        }
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Device not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@put
+                }
+
+                val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val request = call.receive<UpdateDeviceRequest>()
+                validateDevicePayload(request.name, request.config)
+
+                val updated = deviceRepository.updateDevice(
+                    userId = user.id,
+                    deviceId = deviceId,
+                    name = request.name.trim(),
+                    config = request.config
+                )
+                if (updated == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@put
+                }
+
+                call.respond(updated.toResponse())
+            }
+
+            delete("/{deviceId}", {
+                description = "Delete one device of the current user"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.NoContent) {
+                        description = "Device deleted"
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Device not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@delete
+                }
+
+                val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val deleted = deviceRepository.deleteDevice(user.id, deviceId)
+                if (!deleted) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@delete
+                }
+
+                call.response.status(HttpStatusCode.NoContent)
+            }
+        }
     }
 }
 
@@ -286,6 +469,18 @@ private fun validateLoginCredentials(phone: String, password: String) {
     require(phone.isNotBlank()) { "Phone must not be blank" }
     require(PHONE_REGEX.matches(normalizePhone(phone))) { "Phone format is invalid" }
     require(password.isNotBlank()) { "Password must not be blank" }
+}
+
+private fun validateDevicePayload(name: String, config: String) {
+    require(name.isNotBlank()) { "Device name must not be blank" }
+    require(name.trim().length <= 255) { "Device name must not exceed 255 characters" }
+    require(config.isNotBlank()) { "Device config must not be blank" }
+}
+
+private fun parseDeviceId(rawDeviceId: String?): Long {
+    val deviceId = rawDeviceId?.toLongOrNull()
+    require(deviceId != null && deviceId > 0) { "Device id must be a positive number" }
+    return deviceId
 }
 
 private fun normalizePhone(phone: String): String = phone.trim()
@@ -384,6 +579,25 @@ data class CurrentUserResponse(
 )
 
 @Serializable
+data class CreateDeviceRequest(
+    val name: String,
+    val config: String
+)
+
+@Serializable
+data class UpdateDeviceRequest(
+    val name: String,
+    val config: String
+)
+
+@Serializable
+data class DeviceResponse(
+    val id: Long,
+    val name: String,
+    val config: String
+)
+
+@Serializable
 data class ErrorResponse(
     val message: String
 )
@@ -427,4 +641,12 @@ private suspend fun authenticateCurrentUser(
     val decoded = runCatching { jwtService.verifier.verify(bearerToken) }.getOrNull() ?: return null
     val phone = decoded.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
     return userRepository.findByPhone(phone)
+}
+
+private fun Device.toResponse(): DeviceResponse {
+    return DeviceResponse(
+        id = id,
+        name = name,
+        config = config
+    )
 }
