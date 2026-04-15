@@ -12,6 +12,7 @@ interface DeviceRepository {
     fun createDevice(userId: Long, name: String): Device
     fun listDevices(userId: Long): List<Device>
     fun findDevice(userId: Long, deviceId: Long): Device?
+    fun findById(deviceId: Long): Device?
     fun updateDevice(userId: Long, deviceId: Long, name: String): Device?
     fun deleteDevice(userId: Long, deviceId: Long): Boolean
 }
@@ -78,6 +79,24 @@ class SqliteDeviceRepository(
             connection.prepareStatement(sql).use { statement ->
                 statement.setLong(1, userId)
                 statement.setLong(2, deviceId)
+                statement.executeQuery().use { resultSet ->
+                    if (resultSet.next()) resultSet.toDevice() else null
+                }
+            }
+        }
+    }
+
+    override fun findById(deviceId: Long): Device? {
+        val sql = """
+            SELECT id, user_id, name
+            FROM devices
+            WHERE id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.setLong(1, deviceId)
                 statement.executeQuery().use { resultSet ->
                     if (resultSet.next()) resultSet.toDevice() else null
                 }

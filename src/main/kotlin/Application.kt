@@ -58,6 +58,7 @@ fun Application.module() {
     val serverRepository = SqliteServerRepository(databaseFactory)
     val jwtService = JwtService(appConfig.jwt)
     val deviceConfigGenerator = AwgDeviceConfigGenerator()
+    val deviceConfigCleanupService = AwgDeviceConfigCleanupService()
 
     module(
         userRepository,
@@ -66,7 +67,8 @@ fun Application.module() {
         serverRepository,
         jwtService,
         appConfig,
-        deviceConfigGenerator
+        deviceConfigGenerator,
+        deviceConfigCleanupService
     )
 }
 
@@ -77,7 +79,8 @@ fun Application.module(
     serverRepository: ServerRepository,
     jwtService: JwtService,
     appConfig: AppConfig,
-    deviceConfigGenerator: DeviceConfigGenerator = AwgDeviceConfigGenerator()
+    deviceConfigGenerator: DeviceConfigGenerator = AwgDeviceConfigGenerator(),
+    deviceConfigCleanupService: DeviceConfigCleanupService = AwgDeviceConfigCleanupService()
 ) {
     install(CallLogging)
     install(CORS) {
@@ -501,6 +504,19 @@ fun Application.module(
                 }
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val device = deviceRepository.findDevice(user.id, deviceId)
+                if (device == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@delete
+                }
+
+                val linkedConfigs = deviceServerRepository.listByDevice(device.id)
+                linkedConfigs.forEach { config ->
+                    val server = serverRepository.findServer(config.serverId)
+                        ?: error("Server ${config.serverId} for device config ${config.id} was not found")
+                    deviceConfigCleanupService.cleanup(server, config)
+                }
+
                 val deleted = deviceRepository.deleteDevice(user.id, deviceId)
                 if (!deleted) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
@@ -904,6 +920,69 @@ fun Application.module(
                 call.respond(user.toAdminResponse())
             }
         }
+
+        route("/api/configs") {
+            get("", {
+                description = "List all saved device configs, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "All saved configs"
+                        body<List<AdminDeviceConfigResponse>> {
+                            description = "Saved configs with user, device and server context"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
+
+                val response = deviceServerRepository.listAll().map { config ->
+                    config.toAdminResponse(
+                        deviceRepository = deviceRepository,
+                        userRepository = userRepository,
+                        serverRepository = serverRepository
+                    )
+                }
+                call.respond(response)
+            }
+
+            delete("/{configId}", {
+                description = "Delete one saved config, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.NoContent) {
+                        description = "Config deleted"
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Config not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@delete
+
+                val configId = parsePositiveId(call.parameters["configId"], "Config id")
+                val config = deviceServerRepository.findByConfigId(configId)
+                if (config == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
+                    return@delete
+                }
+
+                val server = serverRepository.findServer(config.serverId)
+                    ?: error("Server ${config.serverId} for config ${config.id} was not found")
+                deviceConfigCleanupService.cleanup(server, config)
+
+                val deleted = deviceServerRepository.deleteByConfigId(configId)
+                if (!deleted) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
+                    return@delete
+                }
+
+                call.response.status(HttpStatusCode.NoContent)
+            }
+        }
     }
 }
 
@@ -1029,6 +1108,10 @@ interface DeviceConfigGenerator {
     fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig
 }
 
+interface DeviceConfigCleanupService {
+    fun cleanup(server: Server, config: DeviceServerConfig)
+}
+
 class AwgDeviceConfigGenerator : DeviceConfigGenerator {
     override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
         val created = AwgServerScripts(server.connection).addUser(
@@ -1040,6 +1123,14 @@ class AwgDeviceConfigGenerator : DeviceConfigGenerator {
             clientId = created.clientId,
             config = created.config
         )
+    }
+}
+
+class AwgDeviceConfigCleanupService : DeviceConfigCleanupService {
+    override fun cleanup(server: Server, config: DeviceServerConfig) {
+        val clientId = AwgConfigClientIdExtractor.extractClientId(config.config)
+        check(clientId.isNotBlank()) { "Failed to extract clientId from device config ${config.id}" }
+        AwgServerScripts(server.connection).deleteUser(clientId)
     }
 }
 
@@ -1123,6 +1214,20 @@ data class DeviceDetailsResponse(
 @Serializable
 data class DeviceServerResponse(
     val id: Long,
+    val serverId: Long,
+    val serverName: String,
+    val serverLocation: String,
+    val config: String
+)
+
+@Serializable
+data class AdminDeviceConfigResponse(
+    val id: Long,
+    val userId: Long,
+    val userPhone: String,
+    val userNickname: String,
+    val deviceId: Long,
+    val deviceName: String,
     val serverId: Long,
     val serverName: String,
     val serverLocation: String,
@@ -1271,6 +1376,32 @@ private fun DeviceServerConfig.toResponse(server: Server): DeviceServerResponse 
     return DeviceServerResponse(
         id = id,
         serverId = serverId,
+        serverName = server.name,
+        serverLocation = server.location,
+        config = config
+    )
+}
+
+private fun DeviceServerConfig.toAdminResponse(
+    deviceRepository: DeviceRepository,
+    userRepository: UserRepository,
+    serverRepository: ServerRepository
+): AdminDeviceConfigResponse {
+    val device = deviceRepository.findById(deviceId)
+        ?: error("Device with id=$deviceId was not found for config id=$id")
+    val user = userRepository.findById(device.userId)
+        ?: error("User with id=${device.userId} was not found for config id=$id")
+    val server = serverRepository.findServer(serverId)
+        ?: error("Server with id=$serverId was not found for config id=$id")
+
+    return AdminDeviceConfigResponse(
+        id = id,
+        userId = user.id,
+        userPhone = user.phone,
+        userNickname = user.nickname,
+        deviceId = device.id,
+        deviceName = device.name,
+        serverId = server.id,
         serverName = server.name,
         serverLocation = server.location,
         config = config

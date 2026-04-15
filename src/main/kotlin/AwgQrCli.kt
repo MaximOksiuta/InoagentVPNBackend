@@ -10,7 +10,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import org.bouncycastle.math.ec.rfc7748.X25519
 import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -322,7 +321,7 @@ private object AwgConfigParser {
             }
         }
 
-        val clientPublicKey = derivePublicKey(privateKey)
+        val clientPublicKey = AwgConfigClientIdExtractor.extractClientId("PrivateKey = ${privateKey ?: ""}")
 
         return ParsedAwgConfig(
             endpointHost = endpointHost,
@@ -340,21 +339,6 @@ private object AwgConfigParser {
         )
     }
 
-    private fun derivePublicKey(privateKey: String?): String {
-        if (privateKey.isNullOrBlank()) return ""
-
-        val privateKeyBytes = try {
-            Base64.getDecoder().decode(privateKey)
-        } catch (_: IllegalArgumentException) {
-            return ""
-        }
-
-        if (privateKeyBytes.size != 32) return ""
-
-        val publicKey = ByteArray(32)
-        X25519.generatePublicKey(privateKeyBytes, 0, publicKey, 0)
-        return Base64.getEncoder().encodeToString(publicKey)
-    }
 }
 
 private object AwgQrPngWriter {

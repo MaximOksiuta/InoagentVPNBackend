@@ -10,16 +10,39 @@ data class DeviceServerConfig(
 )
 
 interface DeviceServerRepository {
+    fun listAll(): List<DeviceServerConfig>
     fun listByDevice(deviceId: Long): List<DeviceServerConfig>
+    fun findByConfigId(configId: Long): DeviceServerConfig?
     fun findById(deviceId: Long, configId: Long): DeviceServerConfig?
     fun findByDeviceAndServer(deviceId: Long, serverId: Long): DeviceServerConfig?
     fun upsert(deviceId: Long, serverId: Long, config: String): DeviceServerConfig
+    fun deleteByConfigId(configId: Long): Boolean
     fun delete(deviceId: Long, serverId: Long): Boolean
 }
 
 class SqliteDeviceServerRepository(
     private val databaseFactory: DatabaseFactory
 ) : DeviceServerRepository {
+
+    override fun listAll(): List<DeviceServerConfig> {
+        val sql = """
+            SELECT id, device_id, server_id, config
+            FROM device_servers
+            ORDER BY id ASC
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.executeQuery().use { resultSet ->
+                    buildList {
+                        while (resultSet.next()) {
+                            add(resultSet.toDeviceServerConfig())
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     override fun listByDevice(deviceId: Long): List<DeviceServerConfig> {
         val sql = """
@@ -38,6 +61,24 @@ class SqliteDeviceServerRepository(
                             add(resultSet.toDeviceServerConfig())
                         }
                     }
+                }
+            }
+        }
+    }
+
+    override fun findByConfigId(configId: Long): DeviceServerConfig? {
+        val sql = """
+            SELECT id, device_id, server_id, config
+            FROM device_servers
+            WHERE id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.setLong(1, configId)
+                statement.executeQuery().use { resultSet ->
+                    if (resultSet.next()) resultSet.toDeviceServerConfig() else null
                 }
             }
         }
@@ -133,6 +174,20 @@ class SqliteDeviceServerRepository(
             connection.prepareStatement(sql).use { statement ->
                 statement.setLong(1, deviceId)
                 statement.setLong(2, serverId)
+                statement.executeUpdate() > 0
+            }
+        }
+    }
+
+    override fun deleteByConfigId(configId: Long): Boolean {
+        val sql = """
+            DELETE FROM device_servers
+            WHERE id = ?
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.setLong(1, configId)
                 statement.executeUpdate() > 0
             }
         }
