@@ -1,13 +1,16 @@
 FROM eclipse-temurin:17-jdk AS builder
 WORKDIR /app
 
+ENV GRADLE_USER_HOME=/app/.gradle
+ENV GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.workers.max=1 -Dorg.gradle.jvmargs='-Xmx512m -XX:MaxMetaspaceSize=256m -Dfile.encoding=UTF-8'"
+
 COPY gradlew gradlew
 COPY gradle gradle
 COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 RUN chmod +x gradlew
 
 COPY src src
-RUN ./gradlew installDist --no-daemon
+RUN ./gradlew installDist --no-daemon --max-workers=1 --stacktrace
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
