@@ -8,6 +8,7 @@ COPY gradlew gradlew
 COPY gradle gradle
 COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 RUN chmod +x gradlew
+RUN ./gradlew --version --no-daemon
 
 COPY src src
 RUN ./gradlew installDist initAdminStartScripts --no-daemon --max-workers=1 --stacktrace
