@@ -367,7 +367,7 @@ class AwgServerScripts(private val connection: AwgConnection) {
 
     private fun parsePeerIps(config: String): Map<String, String> {
         val peers = linkedMapOf<String, String>()
-        val regex = Regex("""\[Peer\](.*?)(?=\n\[|\$)""", RegexOption.DOT_MATCHES_ALL)
+        val regex = Regex("""\[Peer\](.*?)(?=\n\[|\z)""", RegexOption.DOT_MATCHES_ALL)
 
         regex.findAll(config).forEach { match ->
             val block = match.groupValues[1]

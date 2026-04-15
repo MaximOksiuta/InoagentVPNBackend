@@ -11,9 +11,11 @@ RUN chmod +x gradlew
 RUN ./gradlew --version --no-daemon
 
 COPY src src
-RUN ./gradlew installDist initAdminStartScripts --no-daemon --max-workers=1 --stacktrace
+RUN ./gradlew installDist initAdminStartScripts repairDuplicateIpsStartScripts --no-daemon --max-workers=1 --stacktrace
 RUN cp /app/build/init-admin-scripts/init_admin /app/build/install/kotlin/bin/init_admin \
-    && cp /app/build/init-admin-scripts/init_admin.bat /app/build/install/kotlin/bin/init_admin.bat
+    && cp /app/build/init-admin-scripts/init_admin.bat /app/build/install/kotlin/bin/init_admin.bat \
+    && cp /app/build/repair-duplicate-ips-scripts/repair_duplicate_ips /app/build/install/kotlin/bin/repair_duplicate_ips \
+    && cp /app/build/repair-duplicate-ips-scripts/repair_duplicate_ips.bat /app/build/install/kotlin/bin/repair_duplicate_ips.bat
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app

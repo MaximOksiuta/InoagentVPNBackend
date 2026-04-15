@@ -64,6 +64,15 @@ val initAdminStartScripts by tasks.registering(CreateStartScripts::class) {
     outputDir = layout.buildDirectory.dir("init-admin-scripts").get().asFile
 }
 
+val repairDuplicateIpsStartScripts by tasks.registering(CreateStartScripts::class) {
+    applicationName = "repair_duplicate_ips"
+    description = "Create a CLI script that fixes duplicate peer IPs and updates stored device configs"
+    mainClass.set("org.example.RepairDuplicateIpsCliKt")
+    classpath = files(tasks.named("jar"), configurations.runtimeClasspath)
+    outputDir = layout.buildDirectory.dir("repair-duplicate-ips-scripts").get().asFile
+}
+
 tasks.named("installDist") {
     dependsOn(initAdminStartScripts)
+    dependsOn(repairDuplicateIpsStartScripts)
 }
