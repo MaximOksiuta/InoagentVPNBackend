@@ -50,7 +50,7 @@ class AuthApiTest {
 
         val registerResponse = client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79991234567", password = "strongpass123", telegramId = 123L))
+            setBody(RegisterRequest(phone = "+79991234567", nickname = "alice", password = "strongpass123", telegramId = 123L))
         }
         assertEquals(HttpStatusCode.Created, registerResponse.status)
 
@@ -68,7 +68,7 @@ class AuthApiTest {
         }
         assertEquals(HttpStatusCode.OK, meResponse.status)
         assertEquals(
-            CurrentUserResponse(id = 1L, phone = "+79991234567", telegramId = 123L, isAdmin = false),
+            CurrentUserResponse(id = 1L, phone = "+79991234567", nickname = "alice", telegramId = 123L, isAdmin = false),
             meResponse.body()
         )
     }
@@ -100,7 +100,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79991112233", password = "strongpass123", telegramId = null))
+            setBody(RegisterRequest(phone = "+79991112233", nickname = "bob", password = "strongpass123", telegramId = null))
         }
 
         val meResponse = client.get("/api/auth/me") {
@@ -110,7 +110,7 @@ class AuthApiTest {
 
         assertEquals(HttpStatusCode.OK, meResponse.status)
         assertEquals(
-            CurrentUserResponse(id = 1L, phone = "+79991112233", telegramId = null, isAdmin = false),
+            CurrentUserResponse(id = 1L, phone = "+79991112233", nickname = "bob", telegramId = null, isAdmin = false),
             meResponse.body()
         )
     }
@@ -143,7 +143,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79991110000", password = "strongpass123", telegramId = null))
+            setBody(RegisterRequest(phone = "+79991110000", nickname = "admin", password = "strongpass123", telegramId = null))
         }
         val user = userRepository.findByPhone("+79991110000")!!
         userRepository.updateIsAdmin(user.id, true)
@@ -159,7 +159,7 @@ class AuthApiTest {
         }
         assertEquals(HttpStatusCode.OK, meResponse.status)
         assertEquals(
-            CurrentUserResponse(id = 1L, phone = "+79991110000", telegramId = null, isAdmin = true),
+            CurrentUserResponse(id = 1L, phone = "+79991110000", nickname = "admin", telegramId = null, isAdmin = true),
             meResponse.body()
         )
     }
@@ -223,7 +223,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000001", password = "strongpass123", telegramId = 11L))
+            setBody(RegisterRequest(phone = "+79990000001", nickname = "first", password = "strongpass123", telegramId = 11L))
         }
         val firstUser = userRepository.findByPhone("+79990000001")!!
         userRepository.updateIsAdmin(firstUser.id, true)
@@ -257,7 +257,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000002", password = "strongpass123", telegramId = 22L))
+            setBody(RegisterRequest(phone = "+79990000002", nickname = "second", password = "strongpass123", telegramId = 22L))
         }
 
         val createResponse = client.post("/api/devices") {
@@ -389,7 +389,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000055", password = "strongpass123", telegramId = null))
+            setBody(RegisterRequest(phone = "+79990000055", nickname = "gen", password = "strongpass123", telegramId = null))
         }
         val user = userRepository.findByPhone("+79990000055")!!
         userRepository.updateIsAdmin(user.id, true)
@@ -491,7 +491,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000066", password = "strongpass123", telegramId = null))
+            setBody(RegisterRequest(phone = "+79990000066", nickname = "dup", password = "strongpass123", telegramId = null))
         }
         val user = userRepository.findByPhone("+79990000066")!!
         userRepository.updateIsAdmin(user.id, true)
@@ -576,7 +576,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000100", password = "strongpass123", telegramId = null))
+            setBody(RegisterRequest(phone = "+79990000100", nickname = "root", password = "strongpass123", telegramId = null))
         }
         val adminUser = userRepository.findByPhone("+79990000100")!!
         userRepository.updateIsAdmin(adminUser.id, true)
@@ -609,7 +609,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000101", password = "strongpass123", telegramId = null))
+            setBody(RegisterRequest(phone = "+79990000101", nickname = "user", password = "strongpass123", telegramId = null))
         }
 
         val loginResponse = client.post("/api/auth/login") {
@@ -684,7 +684,7 @@ class AuthApiTest {
 
         client.post("/api/auth/register") {
             contentType(ContentType.Application.Json)
-            setBody(RegisterRequest(phone = "+79990000111", password = "strongpass123", telegramId = 1L))
+            setBody(RegisterRequest(phone = "+79990000111", nickname = "boss", password = "strongpass123", telegramId = 1L))
         }
         val adminUser = userRepository.findByPhone("+79990000111")!!
         userRepository.updateIsAdmin(adminUser.id, true)

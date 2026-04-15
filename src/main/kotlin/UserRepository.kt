@@ -6,13 +6,14 @@ import java.sql.Statement
 data class User(
     val id: Long,
     val phone: String,
+    val nickname: String,
     val telegramId: Long?,
     val isAdmin: Boolean,
     val passwordHash: String
 )
 
 interface UserRepository {
-    fun createUser(phone: String, telegramId: Long?, passwordHash: String, isAdmin: Boolean = false): User?
+    fun createUser(phone: String, nickname: String, telegramId: Long?, passwordHash: String, isAdmin: Boolean = false): User?
     fun findByPhone(phone: String): User?
     fun updateIsAdmin(userId: Long, isAdmin: Boolean): Boolean
 }
@@ -21,22 +22,23 @@ class SqliteUserRepository(
     private val databaseFactory: DatabaseFactory
 ) : UserRepository {
 
-    override fun createUser(phone: String, telegramId: Long?, passwordHash: String, isAdmin: Boolean): User? {
+    override fun createUser(phone: String, nickname: String, telegramId: Long?, passwordHash: String, isAdmin: Boolean): User? {
         val sql = """
-            INSERT INTO users(phone, telegram_id, is_admin, password_hash)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO users(phone, nickname, telegram_id, is_admin, password_hash)
+            VALUES(?, ?, ?, ?, ?)
         """.trimIndent()
 
         return databaseFactory.connection().use { connection ->
             connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS).use { statement ->
                 statement.setString(1, phone)
+                statement.setString(2, nickname)
                 if (telegramId == null) {
-                    statement.setObject(2, null)
+                    statement.setObject(3, null)
                 } else {
-                    statement.setLong(2, telegramId)
+                    statement.setLong(3, telegramId)
                 }
-                statement.setInt(3, if (isAdmin) 1 else 0)
-                statement.setString(4, passwordHash)
+                statement.setInt(4, if (isAdmin) 1 else 0)
+                statement.setString(5, passwordHash)
 
                 try {
                     val affectedRows = statement.executeUpdate()
@@ -50,6 +52,7 @@ class SqliteUserRepository(
                                 User(
                                     id = generatedKeys.getLong(1),
                                     phone = phone,
+                                    nickname = nickname,
                                     telegramId = telegramId,
                                     isAdmin = isAdmin,
                                     passwordHash = passwordHash
@@ -70,7 +73,7 @@ class SqliteUserRepository(
 
     override fun findByPhone(phone: String): User? {
         val sql = """
-            SELECT id, phone, telegram_id, is_admin, password_hash
+            SELECT id, phone, nickname, telegram_id, is_admin, password_hash
             FROM users
             WHERE phone = ?
             LIMIT 1
@@ -86,6 +89,7 @@ class SqliteUserRepository(
                         User(
                             id = resultSet.getLong("id"),
                             phone = resultSet.getString("phone"),
+                            nickname = resultSet.getString("nickname"),
                             telegramId = resultSet.getObject("telegram_id")?.let {
                                 (it as Number).toLong()
                             },

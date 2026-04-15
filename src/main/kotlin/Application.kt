@@ -196,11 +196,12 @@ fun Application.module(
                 }
             }) {
                 val request = call.receive<RegisterRequest>()
-                validateRegistrationCredentials(request.phone, request.password)
+                validateRegistrationCredentials(request.phone, request.nickname, request.password)
 
                 val normalizedPhone = normalizePhone(request.phone)
                 val createdUser = userRepository.createUser(
                     phone = normalizedPhone,
+                    nickname = request.nickname.trim(),
                     telegramId = request.telegramId,
                     passwordHash = BCrypt.hashpw(request.password, BCrypt.gensalt())
                 )
@@ -218,6 +219,7 @@ fun Application.module(
                     RegisterResponse(
                         id = createdUser.id,
                         phone = createdUser.phone,
+                        nickname = createdUser.nickname,
                         telegramId = createdUser.telegramId
                     )
                 )
@@ -302,6 +304,7 @@ fun Application.module(
                     CurrentUserResponse(
                         id = user.id,
                         phone = user.phone,
+                        nickname = user.nickname,
                         telegramId = user.telegramId,
                         isAdmin = user.isAdmin
                     )
@@ -715,8 +718,9 @@ fun Application.module(
     }
 }
 
-private fun validateRegistrationCredentials(phone: String, password: String) {
+private fun validateRegistrationCredentials(phone: String, nickname: String, password: String) {
     require(phone.isNotBlank()) { "Phone must not be blank" }
+    require(nickname.isNotBlank()) { "Nickname must not be blank" }
     require(PHONE_REGEX.matches(normalizePhone(phone))) { "Phone format is invalid" }
     require(password.length >= 8) { "Password must be at least 8 characters long" }
 }
@@ -840,6 +844,7 @@ class AwgDeviceConfigGenerator : DeviceConfigGenerator {
 @Serializable
 data class RegisterRequest(
     val phone: String,
+    val nickname: String,
     val password: String,
     val telegramId: Long? = null
 )
@@ -848,6 +853,7 @@ data class RegisterRequest(
 data class RegisterResponse(
     val id: Long,
     val phone: String,
+    val nickname: String,
     val telegramId: Long?
 )
 
@@ -868,6 +874,7 @@ data class AuthTokenResponse(
 data class CurrentUserResponse(
     val id: Long,
     val phone: String,
+    val nickname: String,
     val telegramId: Long?,
     val isAdmin: Boolean
 )

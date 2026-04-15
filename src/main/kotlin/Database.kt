@@ -57,6 +57,13 @@ class DatabaseFactory(
             connection.createStatement().use { statement ->
                 statement.executeUpdate("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
             }
+            columns = userTableColumns(connection)
+        }
+
+        if ("nickname" !in columns) {
+            connection.createStatement().use { statement ->
+                statement.executeUpdate("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
+            }
         }
 
         ensureDevicesTable(connection)
@@ -82,6 +89,7 @@ class DatabaseFactory(
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     phone TEXT NOT NULL UNIQUE,
+                    nickname TEXT NOT NULL,
                     telegram_id INTEGER,
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     password_hash TEXT NOT NULL,
