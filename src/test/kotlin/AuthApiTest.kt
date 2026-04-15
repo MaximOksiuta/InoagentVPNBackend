@@ -16,6 +16,11 @@ import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.testing.testApplication
 import io.ktor.server.config.MapApplicationConfig
+import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -379,6 +384,9 @@ class AuthApiTest {
         databaseFactory.initialize()
         val userRepository = SqliteUserRepository(databaseFactory)
         val deviceServerRepository = SqliteDeviceServerRepository(databaseFactory)
+        val noopCleanupService = object : DeviceConfigCleanupService {
+            override fun cleanup(server: Server, config: DeviceServerConfig) = Unit
+        }
         application {
             module(
                 userRepository = userRepository,
@@ -386,7 +394,8 @@ class AuthApiTest {
                 deviceServerRepository = deviceServerRepository,
                 serverRepository = SqliteServerRepository(databaseFactory),
                 jwtService = JwtService(appConfig.jwt),
-                appConfig = appConfig
+                appConfig = appConfig,
+                deviceConfigCleanupService = noopCleanupService
             )
         }
 
@@ -725,6 +734,238 @@ class AuthApiTest {
             """{"message":"Config for this device and server already exists"}""",
             secondGenerate.bodyAsText()
         )
+    }
+
+    @Test
+    fun `concurrent generate for same device and server creates only one config`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val generatorCalls = AtomicInteger(0)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val fakeGenerator = object : DeviceConfigGenerator {
+            override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
+                generatorCalls.incrementAndGet()
+                started.countDown()
+                check(release.await(5, TimeUnit.SECONDS)) { "Timed out waiting to release generator" }
+                return GeneratedDeviceConfig(
+                    clientId = "concurrent-client-id",
+                    config = "generated-config"
+                )
+            }
+        }
+
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig,
+                deviceConfigGenerator = fakeGenerator
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000067", nickname = "race", password = "strongpass123", telegramId = null))
+        }
+        val user = userRepository.findByPhone("+79990000067")!!
+        userRepository.updateIsAdmin(user.id, true)
+        userRepository.updateApproval(user.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000067", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val serverResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "Race Server",
+                    location = "Berlin",
+                    host = "192.0.2.12",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/test",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        val createdServer = serverResponse.body<ServerResponse>()
+
+        val deviceResponse = client.post("/api/devices") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(CreateDeviceRequest(name = "ThinkPad"))
+        }
+        val createdDevice = deviceResponse.body<DeviceResponse>()
+
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val first = pool.submit<io.ktor.client.statement.HttpResponse> {
+                runBlocking {
+                    client.post("/api/devices/${createdDevice.id}/configs/generate") {
+                        header(HttpHeaders.Authorization, "Bearer $token")
+                        contentType(ContentType.Application.Json)
+                        setBody(GenerateDeviceConfigRequest(serverId = createdServer.id))
+                    }
+                }
+            }
+
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+
+            val second = pool.submit<io.ktor.client.statement.HttpResponse> {
+                runBlocking {
+                    client.post("/api/devices/${createdDevice.id}/configs/generate") {
+                        header(HttpHeaders.Authorization, "Bearer $token")
+                        contentType(ContentType.Application.Json)
+                        setBody(GenerateDeviceConfigRequest(serverId = createdServer.id))
+                    }
+                }
+            }
+
+            release.countDown()
+
+            val firstResponse = first.get(5, TimeUnit.SECONDS)
+            val secondResponse = second.get(5, TimeUnit.SECONDS)
+            val statuses = listOf(firstResponse.status, secondResponse.status).sortedBy { it.value }
+
+            assertEquals(listOf(HttpStatusCode.OK, HttpStatusCode.Conflict), statuses)
+            assertEquals(1, generatorCalls.get())
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `concurrent delete of same admin config cleans up only once`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val cleanupCalls = AtomicInteger(0)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val cleanupService = object : DeviceConfigCleanupService {
+            override fun cleanup(server: Server, config: DeviceServerConfig) {
+                cleanupCalls.incrementAndGet()
+                started.countDown()
+                check(release.await(5, TimeUnit.SECONDS)) { "Timed out waiting to release cleanup" }
+            }
+        }
+        val deviceRepository = SqliteDeviceRepository(databaseFactory)
+        val deviceServerRepository = SqliteDeviceServerRepository(databaseFactory)
+        val serverRepository = SqliteServerRepository(databaseFactory)
+
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = deviceRepository,
+                deviceServerRepository = deviceServerRepository,
+                serverRepository = serverRepository,
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig,
+                deviceConfigCleanupService = cleanupService
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000068", nickname = "admin", password = "strongpass123", telegramId = null))
+        }
+        val admin = userRepository.findByPhone("+79990000068")!!
+        userRepository.updateIsAdmin(admin.id, true)
+        userRepository.updateApproval(admin.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000068", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val server = serverRepository.createServer(
+            name = "Delete Server",
+            location = "Warsaw",
+            connection = AwgConnection(
+                host = "192.0.2.13",
+                port = 22,
+                username = "root",
+                password = null,
+                sshKeyPath = "/keys/test",
+                containerName = "amnezia-awg2",
+                containerConfigDir = "/opt/amnezia/awg",
+                interfaceName = "awg0"
+            )
+        )
+        val deviceOwner = userRepository.createUser(
+            phone = "+79990000069",
+            nickname = "owner",
+            telegramId = null,
+            passwordHash = "hash"
+        ) ?: error("User was not created")
+        userRepository.updateApproval(deviceOwner.id, true)
+        val device = deviceRepository.createDevice(deviceOwner.id, "iPhone")
+        val config = deviceServerRepository.upsert(device.id, server.id, "stored-config")
+
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val first = pool.submit<io.ktor.client.statement.HttpResponse> {
+                runBlocking {
+                    client.delete("/api/configs/${config.id}") {
+                        header(HttpHeaders.Authorization, "Bearer $token")
+                    }
+                }
+            }
+
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+
+            val second = pool.submit<io.ktor.client.statement.HttpResponse> {
+                runBlocking {
+                    client.delete("/api/configs/${config.id}") {
+                        header(HttpHeaders.Authorization, "Bearer $token")
+                    }
+                }
+            }
+
+            release.countDown()
+
+            val firstResponse = first.get(5, TimeUnit.SECONDS)
+            val secondResponse = second.get(5, TimeUnit.SECONDS)
+            val statuses = listOf(firstResponse.status, secondResponse.status).sortedBy { it.value }
+
+            assertEquals(listOf(HttpStatusCode.NoContent, HttpStatusCode.NotFound), statuses)
+            assertEquals(1, cleanupCalls.get())
+        } finally {
+            pool.shutdownNow()
+        }
     }
 
     @Test

@@ -40,6 +40,9 @@ import kotlinx.serialization.Serializable
 import org.mindrot.jbcrypt.BCrypt
 import java.util.Date
 import java.text.Normalizer
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 private const val AUTH_JWT = "auth-jwt"
 
@@ -59,6 +62,7 @@ fun Application.module() {
     val jwtService = JwtService(appConfig.jwt)
     val deviceConfigGenerator = AwgDeviceConfigGenerator()
     val deviceConfigCleanupService = AwgDeviceConfigCleanupService()
+    val configMutationGuard = DeviceConfigMutationGuard()
 
     module(
         userRepository,
@@ -68,7 +72,8 @@ fun Application.module() {
         jwtService,
         appConfig,
         deviceConfigGenerator,
-        deviceConfigCleanupService
+        deviceConfigCleanupService,
+        configMutationGuard
     )
 }
 
@@ -80,7 +85,8 @@ fun Application.module(
     jwtService: JwtService,
     appConfig: AppConfig,
     deviceConfigGenerator: DeviceConfigGenerator = AwgDeviceConfigGenerator(),
-    deviceConfigCleanupService: DeviceConfigCleanupService = AwgDeviceConfigCleanupService()
+    deviceConfigCleanupService: DeviceConfigCleanupService = AwgDeviceConfigCleanupService(),
+    configMutationGuard: DeviceConfigMutationGuard = DeviceConfigMutationGuard()
 ) {
     install(CallLogging)
     install(CORS) {
@@ -510,15 +516,20 @@ fun Application.module(
                     return@delete
                 }
 
-                val linkedConfigs = deviceServerRepository.listByDevice(device.id)
-                linkedConfigs.forEach { config ->
-                    val server = serverRepository.findServer(config.serverId)
-                        ?: error("Server ${config.serverId} for device config ${config.id} was not found")
-                    deviceConfigCleanupService.cleanup(server, config)
-                }
+                val deletionStatus = configMutationGuard.withServerLocks(
+                    serverIds = deviceServerRepository.listByDevice(device.id).map(DeviceServerConfig::serverId)
+                ) {
+                    val linkedConfigs = deviceServerRepository.listByDevice(device.id)
+                    linkedConfigs.forEach { config ->
+                        val server = serverRepository.findServer(config.serverId)
+                            ?: error("Server ${config.serverId} for device config ${config.id} was not found")
+                        deviceConfigCleanupService.cleanup(server, config)
+                    }
 
-                val deleted = deviceRepository.deleteDevice(user.id, deviceId)
-                if (!deleted) {
+                    val deleted = deviceRepository.deleteDevice(user.id, deviceId)
+                    if (!deleted) HttpStatusCode.NotFound else HttpStatusCode.NoContent
+                }
+                if (deletionStatus == HttpStatusCode.NotFound) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@delete
                 }
@@ -572,22 +583,30 @@ fun Application.module(
                     return@post
                 }
 
-                val existingConfig = deviceServerRepository.findByDeviceAndServer(device.id, server.id)
-                if (existingConfig != null) {
-                    call.respond(
-                        HttpStatusCode.Conflict,
-                        ErrorResponse("Config for this device and server already exists")
+                val result = configMutationGuard.withServerLock(server.id) {
+                    val existingConfig = deviceServerRepository.findByDeviceAndServer(device.id, server.id)
+                    if (existingConfig != null) {
+                        return@withServerLock GenerateConfigResult.Conflict
+                    }
+
+                    val generated = deviceConfigGenerator.generate(server, user, device)
+                    val saved = deviceServerRepository.upsert(
+                        deviceId = device.id,
+                        serverId = server.id,
+                        config = generated.config
                     )
-                    return@post
+                    GenerateConfigResult.Success(saved)
                 }
 
-                val generated = deviceConfigGenerator.generate(server, user, device)
-                val saved = deviceServerRepository.upsert(
-                    deviceId = device.id,
-                    serverId = server.id,
-                    config = generated.config
-                )
-                call.respond(saved.toResponse(server))
+                when (result) {
+                    GenerateConfigResult.Conflict -> {
+                        call.respond(
+                            HttpStatusCode.Conflict,
+                            ErrorResponse("Config for this device and server already exists")
+                        )
+                    }
+                    is GenerateConfigResult.Success -> call.respond(result.config.toResponse(server))
+                }
             }
 
             get("/{deviceId}/configs/{configId}/file", {
@@ -970,12 +989,20 @@ fun Application.module(
                     return@delete
                 }
 
-                val server = serverRepository.findServer(config.serverId)
-                    ?: error("Server ${config.serverId} for config ${config.id} was not found")
-                deviceConfigCleanupService.cleanup(server, config)
+                val deletionStatus = configMutationGuard.withServerLock(config.serverId) {
+                    val freshConfig = deviceServerRepository.findByConfigId(configId)
+                        ?: return@withServerLock HttpStatusCode.NotFound
+                    val server = serverRepository.findServer(freshConfig.serverId)
+                        ?: error("Server ${freshConfig.serverId} for config ${freshConfig.id} was not found")
+                    deviceConfigCleanupService.cleanup(server, freshConfig)
 
-                val deleted = deviceServerRepository.deleteByConfigId(configId)
-                if (!deleted) {
+                    if (deviceServerRepository.deleteByConfigId(configId)) {
+                        HttpStatusCode.NoContent
+                    } else {
+                        HttpStatusCode.NotFound
+                    }
+                }
+                if (deletionStatus == HttpStatusCode.NotFound) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
                     return@delete
                 }
@@ -1110,6 +1137,33 @@ interface DeviceConfigGenerator {
 
 interface DeviceConfigCleanupService {
     fun cleanup(server: Server, config: DeviceServerConfig)
+}
+
+class DeviceConfigMutationGuard {
+    private val serverLocks = ConcurrentHashMap<Long, ReentrantLock>()
+
+    fun <T> withServerLock(serverId: Long, action: () -> T): T {
+        val lock = serverLocks.computeIfAbsent(serverId) { ReentrantLock() }
+        return lock.withLock(action)
+    }
+
+    fun <T> withServerLocks(serverIds: Iterable<Long>, action: () -> T): T {
+        val locks = serverIds.toSortedSet().map { serverId ->
+            serverLocks.computeIfAbsent(serverId) { ReentrantLock() }
+        }
+
+        locks.forEach(ReentrantLock::lock)
+        try {
+            return action()
+        } finally {
+            locks.asReversed().forEach(ReentrantLock::unlock)
+        }
+    }
+}
+
+private sealed interface GenerateConfigResult {
+    data object Conflict : GenerateConfigResult
+    data class Success(val config: DeviceServerConfig) : GenerateConfigResult
 }
 
 class AwgDeviceConfigGenerator : DeviceConfigGenerator {
