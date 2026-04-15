@@ -36,6 +36,8 @@ import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.routing
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import org.mindrot.jbcrypt.BCrypt
 import java.util.Date
@@ -212,12 +214,14 @@ fun Application.module(
                 validateRegistrationCredentials(request.phone, request.nickname, request.password)
 
                 val normalizedPhone = normalizePhone(request.phone)
-                val createdUser = userRepository.createUser(
-                    phone = normalizedPhone,
-                    nickname = request.nickname.trim(),
-                    telegramId = request.telegramId,
-                    passwordHash = BCrypt.hashpw(request.password, BCrypt.gensalt())
-                )
+                val createdUser = withBlockingIo {
+                    userRepository.createUser(
+                        phone = normalizedPhone,
+                        nickname = request.nickname.trim(),
+                        telegramId = request.telegramId,
+                        passwordHash = BCrypt.hashpw(request.password, BCrypt.gensalt())
+                    )
+                }
 
                 if (createdUser == null) {
                     call.respond(
@@ -271,7 +275,7 @@ fun Application.module(
                 validateLoginCredentials(request.phone, request.password)
 
                 val normalizedPhone = normalizePhone(request.phone)
-                val user = userRepository.findByPhone(normalizedPhone)
+                val user = withBlockingIo { userRepository.findByPhone(normalizedPhone) }
                 if (user == null || !BCrypt.checkpw(request.password, user.passwordHash)) {
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid phone or password"))
                     return@post
@@ -358,9 +362,10 @@ fun Application.module(
                     return@get
                 }
 
-                call.respond(
+                val devices = withBlockingIo {
                     deviceRepository.listDevices(user.id).map { device -> device.toSummaryResponse() }
-                )
+                }
+                call.respond(devices)
             }
 
             post("", {
@@ -390,10 +395,12 @@ fun Application.module(
                 val request = call.receive<CreateDeviceRequest>()
                 validateDevicePayload(request.name)
 
-                val device = deviceRepository.createDevice(
-                    userId = user.id,
-                    name = request.name.trim()
-                )
+                val device = withBlockingIo {
+                    deviceRepository.createDevice(
+                        userId = user.id,
+                        name = request.name.trim()
+                    )
+                }
                 call.respond(HttpStatusCode.Created, device.toSummaryResponse())
             }
 
@@ -422,18 +429,19 @@ fun Application.module(
                 }
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
-                val device = deviceRepository.findDevice(user.id, deviceId)
+                val device = withBlockingIo { deviceRepository.findDevice(user.id, deviceId) }
                 if (device == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@get
                 }
 
-                call.respond(
+                val response = withBlockingIo {
                     device.toDetailsResponse(
                         links = deviceServerRepository.listByDevice(device.id),
                         serverRepository = serverRepository
                     )
-                )
+                }
+                call.respond(response)
             }
 
             put("/{deviceId}", {
@@ -470,22 +478,25 @@ fun Application.module(
                 val request = call.receive<UpdateDeviceRequest>()
                 validateDevicePayload(request.name)
 
-                val updated = deviceRepository.updateDevice(
-                    userId = user.id,
-                    deviceId = deviceId,
-                    name = request.name.trim()
-                )
+                val updated = withBlockingIo {
+                    deviceRepository.updateDevice(
+                        userId = user.id,
+                        deviceId = deviceId,
+                        name = request.name.trim()
+                    )
+                }
                 if (updated == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@put
                 }
 
-                call.respond(
+                val response = withBlockingIo {
                     updated.toDetailsResponse(
                         links = deviceServerRepository.listByDevice(updated.id),
                         serverRepository = serverRepository
                     )
-                )
+                }
+                call.respond(response)
             }
 
             delete("/{deviceId}", {
@@ -510,24 +521,26 @@ fun Application.module(
                 }
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
-                val device = deviceRepository.findDevice(user.id, deviceId)
+                val device = withBlockingIo { deviceRepository.findDevice(user.id, deviceId) }
                 if (device == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@delete
                 }
 
-                val deletionStatus = configMutationGuard.withServerLocks(
-                    serverIds = deviceServerRepository.listByDevice(device.id).map(DeviceServerConfig::serverId)
-                ) {
-                    val linkedConfigs = deviceServerRepository.listByDevice(device.id)
-                    linkedConfigs.forEach { config ->
-                        val server = serverRepository.findServer(config.serverId)
-                            ?: error("Server ${config.serverId} for device config ${config.id} was not found")
-                        deviceConfigCleanupService.cleanup(server, config)
-                    }
+                val deletionStatus = withBlockingIo {
+                    configMutationGuard.withServerLocks(
+                        serverIds = deviceServerRepository.listByDevice(device.id).map(DeviceServerConfig::serverId)
+                    ) {
+                        val linkedConfigs = deviceServerRepository.listByDevice(device.id)
+                        linkedConfigs.forEach { config ->
+                            val server = serverRepository.findServer(config.serverId)
+                                ?: error("Server ${config.serverId} for device config ${config.id} was not found")
+                            deviceConfigCleanupService.cleanup(server, config)
+                        }
 
-                    val deleted = deviceRepository.deleteDevice(user.id, deviceId)
-                    if (!deleted) HttpStatusCode.NotFound else HttpStatusCode.NoContent
+                        val deleted = deviceRepository.deleteDevice(user.id, deviceId)
+                        if (!deleted) HttpStatusCode.NotFound else HttpStatusCode.NoContent
+                    }
                 }
                 if (deletionStatus == HttpStatusCode.NotFound) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
@@ -568,7 +581,7 @@ fun Application.module(
                 }
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
-                val device = deviceRepository.findDevice(user.id, deviceId)
+                val device = withBlockingIo { deviceRepository.findDevice(user.id, deviceId) }
                 if (device == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@post
@@ -577,25 +590,27 @@ fun Application.module(
                 val request = call.receive<GenerateDeviceConfigRequest>()
                 require(request.serverId > 0) { "Server id must be a positive number" }
 
-                val server = serverRepository.findServer(request.serverId)
+                val server = withBlockingIo { serverRepository.findServer(request.serverId) }
                 if (server == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@post
                 }
 
-                val result = configMutationGuard.withServerLock(server.id) {
-                    val existingConfig = deviceServerRepository.findByDeviceAndServer(device.id, server.id)
-                    if (existingConfig != null) {
-                        return@withServerLock GenerateConfigResult.Conflict
-                    }
+                val result = withBlockingIo {
+                    configMutationGuard.withServerLock(server.id) {
+                        val existingConfig = deviceServerRepository.findByDeviceAndServer(device.id, server.id)
+                        if (existingConfig != null) {
+                            return@withServerLock GenerateConfigResult.Conflict
+                        }
 
-                    val generated = deviceConfigGenerator.generate(server, user, device)
-                    val saved = deviceServerRepository.upsert(
-                        deviceId = device.id,
-                        serverId = server.id,
-                        config = generated.config
-                    )
-                    GenerateConfigResult.Success(saved)
+                        val generated = deviceConfigGenerator.generate(server, user, device)
+                        val saved = deviceServerRepository.upsert(
+                            deviceId = device.id,
+                            serverId = server.id,
+                            config = generated.config
+                        )
+                        GenerateConfigResult.Success(saved)
+                    }
                 }
 
                 when (result) {
@@ -632,19 +647,19 @@ fun Application.module(
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
                 val configId = parsePositiveId(call.parameters["configId"], "Config id")
-                val device = deviceRepository.findDevice(user.id, deviceId)
+                val device = withBlockingIo { deviceRepository.findDevice(user.id, deviceId) }
                 if (device == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@get
                 }
 
-                val deviceConfig = deviceServerRepository.findById(device.id, configId)
+                val deviceConfig = withBlockingIo { deviceServerRepository.findById(device.id, configId) }
                 if (deviceConfig == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
                     return@get
                 }
 
-                val server = serverRepository.findServer(deviceConfig.serverId)
+                val server = withBlockingIo { serverRepository.findServer(deviceConfig.serverId) }
                 if (server == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@get
@@ -685,19 +700,19 @@ fun Application.module(
 
                 val deviceId = parseDeviceId(call.parameters["deviceId"])
                 val configId = parsePositiveId(call.parameters["configId"], "Config id")
-                val device = deviceRepository.findDevice(user.id, deviceId)
+                val device = withBlockingIo { deviceRepository.findDevice(user.id, deviceId) }
                 if (device == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
                     return@get
                 }
 
-                val deviceConfig = deviceServerRepository.findById(device.id, configId)
+                val deviceConfig = withBlockingIo { deviceServerRepository.findById(device.id, configId) }
                 if (deviceConfig == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
                     return@get
                 }
 
-                val server = serverRepository.findServer(deviceConfig.serverId)
+                val server = withBlockingIo { serverRepository.findServer(deviceConfig.serverId) }
                 if (server == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@get
@@ -739,7 +754,8 @@ fun Application.module(
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
                     return@get
                 }
-                call.respond(serverRepository.listServers().map { it.toListItemResponse() })
+                val servers = withBlockingIo { serverRepository.listServers().map { it.toListItemResponse() } }
+                call.respond(servers)
             }
 
             post("", {
@@ -764,11 +780,13 @@ fun Application.module(
                 val request = call.receive<UpsertServerRequest>()
                 validateServerPayload(request)
 
-                val server = serverRepository.createServer(
-                    name = request.name.trim(),
-                    location = request.location.trim(),
-                    connection = request.toAwgConnection()
-                )
+                val server = withBlockingIo {
+                    serverRepository.createServer(
+                        name = request.name.trim(),
+                        location = request.location.trim(),
+                        connection = request.toAwgConnection()
+                    )
+                }
                 call.respond(HttpStatusCode.Created, server.toResponse())
             }
 
@@ -792,7 +810,7 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
                 val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
-                val server = serverRepository.findServer(serverId)
+                val server = withBlockingIo { serverRepository.findServer(serverId) }
                 if (server == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@get
@@ -829,12 +847,14 @@ fun Application.module(
                 val request = call.receive<UpsertServerRequest>()
                 validateServerPayload(request)
 
-                val updated = serverRepository.updateServer(
-                    serverId = serverId,
-                    name = request.name.trim(),
-                    location = request.location.trim(),
-                    connection = request.toAwgConnection()
-                )
+                val updated = withBlockingIo {
+                    serverRepository.updateServer(
+                        serverId = serverId,
+                        name = request.name.trim(),
+                        location = request.location.trim(),
+                        connection = request.toAwgConnection()
+                    )
+                }
                 if (updated == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@put
@@ -859,7 +879,15 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@delete
                 val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
-                val deleted = serverRepository.deleteServer(serverId)
+                val hasConfigs = withBlockingIo { deviceServerRepository.existsByServer(serverId) }
+                if (hasConfigs) {
+                    call.respond(
+                        HttpStatusCode.Conflict,
+                        ErrorResponse("Server cannot be deleted while device configs still reference it")
+                    )
+                    return@delete
+                }
+                val deleted = withBlockingIo { serverRepository.deleteServer(serverId) }
                 if (!deleted) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@delete
@@ -882,7 +910,8 @@ fun Application.module(
                 }
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
-                call.respond(userRepository.listUsers().map { it.toAdminResponse() })
+                val users = withBlockingIo { userRepository.listUsers().map { it.toAdminResponse() } }
+                call.respond(users)
             }
 
             post("/{userId}/approve", {
@@ -899,12 +928,12 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@post
                 val userId = parsePositiveId(call.parameters["userId"], "User id")
-                val updated = userRepository.updateApproval(userId, true)
+                val updated = withBlockingIo { userRepository.updateApproval(userId, true) }
                 if (!updated) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
                     return@post
                 }
-                val user = userRepository.findById(userId)
+                val user = withBlockingIo { userRepository.findById(userId) }
                 if (user == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
                     return@post
@@ -926,12 +955,12 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@post
                 val userId = parsePositiveId(call.parameters["userId"], "User id")
-                val updated = userRepository.updateBan(userId, true)
+                val updated = withBlockingIo { userRepository.updateBan(userId, true) }
                 if (!updated) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
                     return@post
                 }
-                val user = userRepository.findById(userId)
+                val user = withBlockingIo { userRepository.findById(userId) }
                 if (user == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
                     return@post
@@ -955,12 +984,14 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
 
-                val response = deviceServerRepository.listAll().map { config ->
-                    config.toAdminResponse(
-                        deviceRepository = deviceRepository,
-                        userRepository = userRepository,
-                        serverRepository = serverRepository
-                    )
+                val response = withBlockingIo {
+                    deviceServerRepository.listAll().map { config ->
+                        config.toAdminResponse(
+                            deviceRepository = deviceRepository,
+                            userRepository = userRepository,
+                            serverRepository = serverRepository
+                        )
+                    }
                 }
                 call.respond(response)
             }
@@ -983,23 +1014,25 @@ fun Application.module(
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@delete
 
                 val configId = parsePositiveId(call.parameters["configId"], "Config id")
-                val config = deviceServerRepository.findByConfigId(configId)
+                val config = withBlockingIo { deviceServerRepository.findByConfigId(configId) }
                 if (config == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
                     return@delete
                 }
 
-                val deletionStatus = configMutationGuard.withServerLock(config.serverId) {
-                    val freshConfig = deviceServerRepository.findByConfigId(configId)
-                        ?: return@withServerLock HttpStatusCode.NotFound
-                    val server = serverRepository.findServer(freshConfig.serverId)
-                        ?: error("Server ${freshConfig.serverId} for config ${freshConfig.id} was not found")
-                    deviceConfigCleanupService.cleanup(server, freshConfig)
+                val deletionStatus = withBlockingIo {
+                    configMutationGuard.withServerLock(config.serverId) {
+                        val freshConfig = deviceServerRepository.findByConfigId(configId)
+                            ?: return@withServerLock HttpStatusCode.NotFound
+                        val server = serverRepository.findServer(freshConfig.serverId)
+                            ?: error("Server ${freshConfig.serverId} for config ${freshConfig.id} was not found")
+                        deviceConfigCleanupService.cleanup(server, freshConfig)
 
-                    if (deviceServerRepository.deleteByConfigId(configId)) {
-                        HttpStatusCode.NoContent
-                    } else {
-                        HttpStatusCode.NotFound
+                        if (deviceServerRepository.deleteByConfigId(configId)) {
+                            HttpStatusCode.NoContent
+                        } else {
+                            HttpStatusCode.NotFound
+                        }
                     }
                 }
                 if (deletionStatus == HttpStatusCode.NotFound) {
@@ -1019,6 +1052,8 @@ private fun validateRegistrationCredentials(phone: String, nickname: String, pas
     require(PHONE_REGEX.matches(normalizePhone(phone))) { "Phone format is invalid" }
     require(password.length >= 8) { "Password must be at least 8 characters long" }
 }
+
+private suspend fun <T> withBlockingIo(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 
 private fun validateLoginCredentials(phone: String, password: String) {
     require(phone.isNotBlank()) { "Phone must not be blank" }
@@ -1350,13 +1385,17 @@ private suspend fun authenticateCurrentUser(
         if (appConfig.superKey.isBlank() || superKey != appConfig.superKey) {
             return null
         }
-        return userRepository.findByPhone(phoneFromHeader)?.takeIf(User::canAccessAccount)
+        return withBlockingIo {
+            userRepository.findByPhone(phoneFromHeader)?.takeIf(User::canAccessAccount)
+        }
     }
 
     val principal = call.principal<JWTPrincipal>()
     if (principal != null) {
         val phone = principal.payload.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
-        return userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
+        return withBlockingIo {
+            userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
+        }
     }
 
     val bearerToken = call.request.headers["Authorization"]
@@ -1367,7 +1406,9 @@ private suspend fun authenticateCurrentUser(
 
     val decoded = runCatching { jwtService.verifier.verify(bearerToken) }.getOrNull() ?: return null
     val phone = decoded.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
-    return userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
+    return withBlockingIo {
+        userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
+    }
 }
 
 private suspend fun authenticateAdmin(

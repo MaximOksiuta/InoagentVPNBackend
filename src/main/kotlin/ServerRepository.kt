@@ -111,12 +111,12 @@ class SqliteServerRepository(
             WHERE id = ?
         """.trimIndent()
 
-        return databaseFactory.connection().use { db ->
+        return databaseFactory.transaction { db ->
             db.prepareStatement(sql).use { statement ->
                 bindServer(statement, name, location, connection)
                 statement.setLong(11, serverId)
                 val updatedRows = statement.executeUpdate()
-                if (updatedRows == 0) null else findServer(serverId)
+                if (updatedRows == 0) null else findServer(db, serverId)
             }
         }
     }
@@ -169,5 +169,21 @@ class SqliteServerRepository(
                 interfaceName = getString("interface_name")
             )
         )
+    }
+
+    private fun findServer(connection: java.sql.Connection, serverId: Long): Server? {
+        val sql = """
+            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name
+            FROM servers
+            WHERE id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return connection.prepareStatement(sql).use { statement ->
+            statement.setLong(1, serverId)
+            statement.executeQuery().use { resultSet ->
+                if (resultSet.next()) resultSet.toServer() else null
+            }
+        }
     }
 }

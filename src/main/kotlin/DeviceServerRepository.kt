@@ -12,6 +12,7 @@ data class DeviceServerConfig(
 interface DeviceServerRepository {
     fun listAll(): List<DeviceServerConfig>
     fun listByDevice(deviceId: Long): List<DeviceServerConfig>
+    fun existsByServer(serverId: Long): Boolean
     fun findByConfigId(configId: Long): DeviceServerConfig?
     fun findById(deviceId: Long, configId: Long): DeviceServerConfig?
     fun findByDeviceAndServer(deviceId: Long, serverId: Long): DeviceServerConfig?
@@ -23,6 +24,24 @@ interface DeviceServerRepository {
 class SqliteDeviceServerRepository(
     private val databaseFactory: DatabaseFactory
 ) : DeviceServerRepository {
+
+    override fun existsByServer(serverId: Long): Boolean {
+        val sql = """
+            SELECT 1
+            FROM device_servers
+            WHERE server_id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.setLong(1, serverId)
+                statement.executeQuery().use { resultSet ->
+                    resultSet.next()
+                }
+            }
+        }
+    }
 
     override fun listAll(): List<DeviceServerConfig> {
         val sql = """
@@ -133,7 +152,7 @@ class SqliteDeviceServerRepository(
             VALUES(?, ?, ?)
         """.trimIndent()
 
-        return databaseFactory.connection().use { connection ->
+        return databaseFactory.transaction { connection ->
             val updated = connection.prepareStatement(updateSql).use { statement ->
                 statement.setString(1, config)
                 statement.setLong(2, deviceId)
@@ -141,7 +160,7 @@ class SqliteDeviceServerRepository(
                 statement.executeUpdate()
             }
             if (updated > 0) {
-                return@use findByDeviceAndServer(deviceId, serverId)
+                return@transaction findByDeviceAndServer(connection, deviceId, serverId)
                     ?: error("Failed to load updated device-server config")
             }
 
@@ -159,7 +178,7 @@ class SqliteDeviceServerRepository(
                 throw exception
             }
 
-            findByDeviceAndServer(deviceId, serverId)
+            findByDeviceAndServer(connection, deviceId, serverId)
                 ?: error("Failed to load created device-server config")
         }
     }
@@ -200,5 +219,26 @@ class SqliteDeviceServerRepository(
             serverId = getLong("server_id"),
             config = getString("config")
         )
+    }
+
+    private fun findByDeviceAndServer(
+        connection: java.sql.Connection,
+        deviceId: Long,
+        serverId: Long
+    ): DeviceServerConfig? {
+        val sql = """
+            SELECT id, device_id, server_id, config
+            FROM device_servers
+            WHERE device_id = ? AND server_id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return connection.prepareStatement(sql).use { statement ->
+            statement.setLong(1, deviceId)
+            statement.setLong(2, serverId)
+            statement.executeQuery().use { resultSet ->
+                if (resultSet.next()) resultSet.toDeviceServerConfig() else null
+            }
+        }
     }
 }

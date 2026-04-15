@@ -26,6 +26,26 @@ class DatabaseFactory(
         return DriverManager.getConnection("jdbc:sqlite:${databasePath.toAbsolutePath()}").also { connection ->
             connection.createStatement().use { statement ->
                 statement.execute("PRAGMA foreign_keys = ON")
+                statement.execute("PRAGMA busy_timeout = 5000")
+                statement.execute("PRAGMA journal_mode = WAL")
+                statement.execute("PRAGMA synchronous = NORMAL")
+            }
+        }
+    }
+
+    fun <T> transaction(block: (Connection) -> T): T {
+        return connection().use { connection ->
+            val previousAutoCommit = connection.autoCommit
+            connection.autoCommit = false
+            try {
+                val result = block(connection)
+                connection.commit()
+                result
+            } catch (exception: Throwable) {
+                runCatching { connection.rollback() }
+                throw exception
+            } finally {
+                connection.autoCommit = previousAutoCommit
             }
         }
     }

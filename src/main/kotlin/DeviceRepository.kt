@@ -111,13 +111,13 @@ class SqliteDeviceRepository(
             WHERE user_id = ? AND id = ?
         """.trimIndent()
 
-        return databaseFactory.connection().use { connection ->
+        return databaseFactory.transaction { connection ->
             connection.prepareStatement(sql).use { statement ->
                 statement.setString(1, name)
                 statement.setLong(2, userId)
                 statement.setLong(3, deviceId)
                 val updatedRows = statement.executeUpdate()
-                if (updatedRows == 0) null else findDevice(userId, deviceId)
+                if (updatedRows == 0) null else findDevice(connection, userId, deviceId)
             }
         }
     }
@@ -143,5 +143,22 @@ class SqliteDeviceRepository(
             userId = getLong("user_id"),
             name = getString("name")
         )
+    }
+
+    private fun findDevice(connection: java.sql.Connection, userId: Long, deviceId: Long): Device? {
+        val sql = """
+            SELECT id, user_id, name
+            FROM devices
+            WHERE user_id = ? AND id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return connection.prepareStatement(sql).use { statement ->
+            statement.setLong(1, userId)
+            statement.setLong(2, deviceId)
+            statement.executeQuery().use { resultSet ->
+                if (resultSet.next()) resultSet.toDevice() else null
+            }
+        }
     }
 }

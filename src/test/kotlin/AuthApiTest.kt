@@ -538,6 +538,74 @@ class AuthApiTest {
     }
 
     @Test
+    fun `server cannot be deleted while configs still reference it`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val deviceRepository = SqliteDeviceRepository(databaseFactory)
+        val deviceServerRepository = SqliteDeviceServerRepository(databaseFactory)
+        val serverRepository = SqliteServerRepository(databaseFactory)
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = deviceRepository,
+                deviceServerRepository = deviceServerRepository,
+                serverRepository = serverRepository,
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000111", nickname = "admin", password = "strongpass123", telegramId = null))
+        }
+        val admin = userRepository.findByPhone("+79990000111")!!
+        userRepository.updateIsAdmin(admin.id, true)
+        userRepository.updateApproval(admin.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000111", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val server = serverRepository.createServer(
+            name = "Protected Server",
+            location = "Prague",
+            connection = AwgConnection(
+                host = "10.0.0.10",
+                port = 22,
+                username = "root",
+                password = "secret"
+            )
+        )
+        val device = deviceRepository.createDevice(admin.id, "MacBook")
+        deviceServerRepository.upsert(device.id, server.id, "[Interface]\nPrivateKey=test")
+
+        val deleteResponse = client.delete("/api/servers/${server.id}") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+
+        assertEquals(HttpStatusCode.Conflict, deleteResponse.status)
+        assertEquals(
+            """{"message":"Server cannot be deleted while device configs still reference it"}""",
+            deleteResponse.bodyAsText()
+        )
+        assertTrue(serverRepository.findServer(server.id) != null)
+    }
+
+    @Test
     fun `device config can be generated saved and returned`() = testApplication {
         environment {
             config = MapApplicationConfig()
