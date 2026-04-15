@@ -11,6 +11,7 @@ data class DeviceServerConfig(
 
 interface DeviceServerRepository {
     fun listByDevice(deviceId: Long): List<DeviceServerConfig>
+    fun findById(deviceId: Long, configId: Long): DeviceServerConfig?
     fun findByDeviceAndServer(deviceId: Long, serverId: Long): DeviceServerConfig?
     fun upsert(deviceId: Long, serverId: Long, config: String): DeviceServerConfig
     fun delete(deviceId: Long, serverId: Long): Boolean
@@ -37,6 +38,25 @@ class SqliteDeviceServerRepository(
                             add(resultSet.toDeviceServerConfig())
                         }
                     }
+                }
+            }
+        }
+    }
+
+    override fun findById(deviceId: Long, configId: Long): DeviceServerConfig? {
+        val sql = """
+            SELECT id, device_id, server_id, config
+            FROM device_servers
+            WHERE device_id = ? AND id = ?
+            LIMIT 1
+        """.trimIndent()
+
+        return databaseFactory.connection().use { connection ->
+            connection.prepareStatement(sql).use { statement ->
+                statement.setLong(1, deviceId)
+                statement.setLong(2, configId)
+                statement.executeQuery().use { resultSet ->
+                    if (resultSet.next()) resultSet.toDeviceServerConfig() else null
                 }
             }
         }

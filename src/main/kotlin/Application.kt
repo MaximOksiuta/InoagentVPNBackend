@@ -16,6 +16,8 @@ import io.github.smiley4.ktorswaggerui.routing.swaggerUI
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
+import io.ktor.http.ContentDisposition
+import io.ktor.http.ContentType
 import io.ktor.server.application.Application
 import io.ktor.server.application.call
 import io.ktor.server.application.install
@@ -31,11 +33,13 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.routing
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.Serializable
 import org.mindrot.jbcrypt.BCrypt
 import java.util.Date
+import java.text.Normalizer
 
 private const val AUTH_JWT = "auth-jwt"
 
@@ -561,6 +565,111 @@ fun Application.module(
                 )
                 call.respond(saved.toResponse(server))
             }
+
+            get("/{deviceId}/configs/{configId}/file", {
+                description = "Download one saved config file for the current user's device"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Config file content"
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Device or config not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@get
+                }
+
+                val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val configId = parsePositiveId(call.parameters["configId"], "Config id")
+                val device = deviceRepository.findDevice(user.id, deviceId)
+                if (device == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@get
+                }
+
+                val deviceConfig = deviceServerRepository.findById(device.id, configId)
+                if (deviceConfig == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
+                    return@get
+                }
+
+                val server = serverRepository.findServer(deviceConfig.serverId)
+                if (server == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@get
+                }
+
+                val fileName = buildConfigFileName(server.location, device.name)
+                call.response.headers.append(
+                    HttpHeaders.ContentDisposition,
+                    ContentDisposition.Attachment.withParameter(ContentDisposition.Parameters.FileName, fileName).toString()
+                )
+                call.respondBytes(
+                    bytes = deviceConfig.config.toByteArray(Charsets.UTF_8),
+                    contentType = ContentType.Text.Plain,
+                    status = HttpStatusCode.OK
+                )
+            }
+
+            get("/{deviceId}/configs/{configId}/qr", {
+                description = "Get QR code PNG for one saved config of the current user's device"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "QR code PNG"
+                    }
+                    code(HttpStatusCode.NotFound) {
+                        description = "Device or config not found"
+                        body<ErrorResponse> {
+                            description = "Not found error payload"
+                        }
+                    }
+                }
+            }) {
+                val user = authenticateCurrentUser(call, userRepository, jwtService, appConfig)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials"))
+                    return@get
+                }
+
+                val deviceId = parseDeviceId(call.parameters["deviceId"])
+                val configId = parsePositiveId(call.parameters["configId"], "Config id")
+                val device = deviceRepository.findDevice(user.id, deviceId)
+                if (device == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Device not found"))
+                    return@get
+                }
+
+                val deviceConfig = deviceServerRepository.findById(device.id, configId)
+                if (deviceConfig == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Config not found"))
+                    return@get
+                }
+
+                val server = serverRepository.findServer(deviceConfig.serverId)
+                if (server == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
+                    return@get
+                }
+
+                val qrPng = AwgQrCodeService.generatePng(
+                    confText = deviceConfig.config,
+                    descriptionOverride = server.location
+                )
+                call.respondBytes(
+                    bytes = qrPng,
+                    contentType = ContentType.Image.PNG,
+                    status = HttpStatusCode.OK
+                )
+            }
         }
 
         route("/api/servers") {
@@ -734,6 +843,19 @@ private fun validateLoginCredentials(phone: String, password: String) {
 private fun validateDevicePayload(name: String) {
     require(name.isNotBlank()) { "Device name must not be blank" }
     require(name.trim().length <= 255) { "Device name must not exceed 255 characters" }
+}
+
+private fun buildConfigFileName(region: String, deviceName: String): String {
+    val safeRegion = sanitizeFileNamePart(region)
+    val safeDeviceName = sanitizeFileNamePart(deviceName)
+    return "${safeRegion}_${safeDeviceName}.conf"
+}
+
+private fun sanitizeFileNamePart(value: String): String {
+    val normalized = Normalizer.normalize(value.trim(), Normalizer.Form.NFKD)
+    val asciiOnly = normalized.replace(Regex("[^\\p{ASCII}]"), "")
+    val safe = asciiOnly.replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_')
+    return safe.ifBlank { "item" }
 }
 
 private fun parseDeviceId(rawDeviceId: String?): Long {

@@ -35,11 +35,21 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.5.6")
     implementation("org.xerial:sqlite-jdbc:3.46.0.0")
     implementation("org.mindrot:jbcrypt:0.4")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:javase:3.5.3")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 }
 
 tasks.test {
     useJUnitPlatform()
 }
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(17)
+}
+
+tasks.register<JavaExec>("awgQrFromConfig") {
+    group = "application"
+    description = "Generate an Amnezia-compatible AWG QR PNG from a WireGuard/AWG config file"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("org.example.AwgQrCliKt")
 }

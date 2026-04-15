@@ -20,6 +20,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class AuthApiTest {
 
@@ -546,6 +547,123 @@ class AuthApiTest {
             """{"message":"Config for this device and server already exists"}""",
             secondGenerate.bodyAsText()
         )
+    }
+
+    @Test
+    fun `user can download config file and qr for generated config`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        val fakeGenerator = object : DeviceConfigGenerator {
+            override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
+                return GeneratedDeviceConfig(
+                    clientId = "download-client-id",
+                    config = """
+                        [Interface]
+                        PrivateKey = fake
+                        Address = 10.0.0.2/32
+                        DNS = 1.1.1.1, 1.0.0.1
+
+                        [Peer]
+                        PublicKey = server-key
+                        AllowedIPs = 0.0.0.0/0, ::/0
+                        Endpoint = vpn.example.com:51820
+                        PersistentKeepalive = 25
+                    """.trimIndent()
+                )
+            }
+        }
+
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig,
+                deviceConfigGenerator = fakeGenerator
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79990000077", nickname = "qr", password = "strongpass123", telegramId = null))
+        }
+        val user = userRepository.findByPhone("+79990000077")!!
+        userRepository.updateIsAdmin(user.id, true)
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79990000077", password = "strongpass123"))
+        }
+        val token = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val serverResponse = client.post("/api/servers") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(
+                UpsertServerRequest(
+                    name = "QR Server",
+                    location = "North Europe",
+                    host = "192.0.2.12",
+                    port = 22,
+                    username = "root",
+                    password = null,
+                    sshKeyPath = "/keys/test",
+                    containerName = "amnezia-awg2",
+                    containerConfigDir = "/opt/amnezia/awg",
+                    interfaceName = "awg0"
+                )
+            )
+        }
+        val createdServer = serverResponse.body<ServerResponse>()
+
+        val deviceResponse = client.post("/api/devices") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(CreateDeviceRequest(name = "My Phone"))
+        }
+        val createdDevice = deviceResponse.body<DeviceResponse>()
+
+        val generateResponse = client.post("/api/devices/${createdDevice.id}/configs/generate") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(GenerateDeviceConfigRequest(serverId = createdServer.id))
+        }
+        val createdConfig = generateResponse.body<DeviceServerResponse>()
+
+        val fileResponse = client.get("/api/devices/${createdDevice.id}/configs/${createdConfig.id}/file") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.OK, fileResponse.status)
+        assertEquals("text/plain", fileResponse.headers[HttpHeaders.ContentType])
+        assertTrue(
+            fileResponse.headers[HttpHeaders.ContentDisposition]?.contains("filename=North_Europe_My_Phone.conf") == true
+        )
+        assertEquals(createdConfig.config, fileResponse.bodyAsText())
+
+        val qrResponse = client.get("/api/devices/${createdDevice.id}/configs/${createdConfig.id}/qr") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.OK, qrResponse.status)
+        assertEquals(ContentType.Image.PNG, qrResponse.contentType())
+        val qrBytes = qrResponse.body<ByteArray>()
+        assertTrue(qrBytes.size > 8)
+        assertTrue(qrBytes[0] == 0x89.toByte())
+        assertTrue(qrBytes[1] == 0x50.toByte())
+        assertTrue(qrBytes[2] == 0x4E.toByte())
+        assertTrue(qrBytes[3] == 0x47.toByte())
     }
 
     @Test
