@@ -1,3 +1,5 @@
+import org.gradle.jvm.application.tasks.CreateStartScripts
+
 plugins {
     kotlin("jvm") version "1.9.23"
     kotlin("plugin.serialization") version "1.9.23"
@@ -52,4 +54,16 @@ tasks.register<JavaExec>("awgQrFromConfig") {
     description = "Generate an Amnezia-compatible AWG QR PNG from a WireGuard/AWG config file"
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("org.example.AwgQrCliKt")
+}
+
+val initAdminStartScripts by tasks.registering(CreateStartScripts::class) {
+    applicationName = "init_admin"
+    description = "Create a CLI script that approves a user and grants admin access by phone number"
+    mainClass.set("org.example.InitAdminCliKt")
+    classpath = files(tasks.named("jar"), configurations.runtimeClasspath)
+    outputDir = layout.buildDirectory.dir("init-admin-scripts").get().asFile
+}
+
+tasks.named("installDist") {
+    dependsOn(initAdminStartScripts)
 }

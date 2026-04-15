@@ -10,7 +10,9 @@ COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 RUN chmod +x gradlew
 
 COPY src src
-RUN ./gradlew installDist --no-daemon --max-workers=1 --stacktrace
+RUN ./gradlew installDist initAdminStartScripts --no-daemon --max-workers=1 --stacktrace
+RUN cp /app/build/init-admin-scripts/init_admin /app/build/install/kotlin/bin/init_admin \
+    && cp /app/build/init-admin-scripts/init_admin.bat /app/build/install/kotlin/bin/init_admin.bat
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app
