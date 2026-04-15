@@ -30,11 +30,12 @@ class AuthApiTest {
             config = MapApplicationConfig()
         }
         val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
         application {
-            val databaseFactory = DatabaseFactory(appConfig.databasePath)
-            databaseFactory.initialize()
             module(
-                userRepository = SqliteUserRepository(databaseFactory),
+                userRepository = userRepository,
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
                 deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
@@ -54,6 +55,7 @@ class AuthApiTest {
             setBody(RegisterRequest(phone = "+79991234567", nickname = "alice", password = "strongpass123", telegramId = 123L))
         }
         assertEquals(HttpStatusCode.Created, registerResponse.status)
+        userRepository.approveByPhone("+79991234567")
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -80,11 +82,12 @@ class AuthApiTest {
             config = MapApplicationConfig()
         }
         val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
         application {
-            val databaseFactory = DatabaseFactory(appConfig.databasePath)
-            databaseFactory.initialize()
             module(
-                userRepository = SqliteUserRepository(databaseFactory),
+                userRepository = userRepository,
                 deviceRepository = SqliteDeviceRepository(databaseFactory),
                 deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
                 serverRepository = SqliteServerRepository(databaseFactory),
@@ -103,6 +106,7 @@ class AuthApiTest {
             contentType(ContentType.Application.Json)
             setBody(RegisterRequest(phone = "+79991112233", nickname = "bob", password = "strongpass123", telegramId = null))
         }
+        userRepository.approveByPhone("+79991112233")
 
         val meResponse = client.get("/api/auth/me") {
             header("X-Super-Key", appConfig.superKey)
@@ -148,6 +152,7 @@ class AuthApiTest {
         }
         val user = userRepository.findByPhone("+79991110000")!!
         userRepository.updateIsAdmin(user.id, true)
+        userRepository.updateApproval(user.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -196,6 +201,175 @@ class AuthApiTest {
     }
 
     @Test
+    fun `unapproved user cannot log in until admin approves`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79992223344", nickname = "pending", password = "strongpass123", telegramId = null))
+        }
+
+        val rejectedLogin = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79992223344", password = "strongpass123"))
+        }
+        assertEquals(HttpStatusCode.Forbidden, rejectedLogin.status)
+        assertEquals("""{"message":"User is not approved"}""", rejectedLogin.bodyAsText())
+
+        userRepository.approveByPhone("+79992223344")
+
+        val approvedLogin = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79992223344", password = "strongpass123"))
+        }
+        assertEquals(HttpStatusCode.OK, approvedLogin.status)
+    }
+
+    @Test
+    fun `admin can list approve and ban users`() = testApplication {
+        environment {
+            config = MapApplicationConfig()
+        }
+        val appConfig = testConfig()
+        val databaseFactory = DatabaseFactory(appConfig.databasePath)
+        databaseFactory.initialize()
+        val userRepository = SqliteUserRepository(databaseFactory)
+        application {
+            module(
+                userRepository = userRepository,
+                deviceRepository = SqliteDeviceRepository(databaseFactory),
+                deviceServerRepository = SqliteDeviceServerRepository(databaseFactory),
+                serverRepository = SqliteServerRepository(databaseFactory),
+                jwtService = JwtService(appConfig.jwt),
+                appConfig = appConfig
+            )
+        }
+
+        val client = createClient {
+            install(ContentNegotiation) {
+                json()
+            }
+        }
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79992220001", nickname = "chief", password = "strongpass123", telegramId = 1L))
+        }
+        val adminUser = userRepository.findByPhone("+79992220001")!!
+        userRepository.updateIsAdmin(adminUser.id, true)
+        userRepository.updateApproval(adminUser.id, true)
+
+        client.post("/api/auth/register") {
+            contentType(ContentType.Application.Json)
+            setBody(RegisterRequest(phone = "+79992220002", nickname = "target", password = "strongpass123", telegramId = 2L))
+        }
+        val targetUser = userRepository.findByPhone("+79992220002")!!
+
+        val loginResponse = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79992220001", password = "strongpass123"))
+        }
+        val adminToken = loginResponse.body<AuthTokenResponse>().accessToken
+
+        val listBeforeApproval = client.get("/api/users") {
+            header(HttpHeaders.Authorization, "Bearer $adminToken")
+        }
+        assertEquals(HttpStatusCode.OK, listBeforeApproval.status)
+        assertEquals(
+            listOf(
+                AdminUserResponse(
+                    id = adminUser.id,
+                    phone = adminUser.phone,
+                    nickname = adminUser.nickname,
+                    telegramId = adminUser.telegramId,
+                    isAdmin = true,
+                    isApproved = true,
+                    isBanned = false
+                ),
+                AdminUserResponse(
+                    id = targetUser.id,
+                    phone = targetUser.phone,
+                    nickname = targetUser.nickname,
+                    telegramId = targetUser.telegramId,
+                    isAdmin = false,
+                    isApproved = false,
+                    isBanned = false
+                )
+            ),
+            listBeforeApproval.body()
+        )
+
+        val approveResponse = client.post("/api/users/${targetUser.id}/approve") {
+            header(HttpHeaders.Authorization, "Bearer $adminToken")
+        }
+        assertEquals(HttpStatusCode.OK, approveResponse.status)
+        assertEquals(
+            AdminUserResponse(
+                id = targetUser.id,
+                phone = targetUser.phone,
+                nickname = targetUser.nickname,
+                telegramId = targetUser.telegramId,
+                isAdmin = false,
+                isApproved = true,
+                isBanned = false
+            ),
+            approveResponse.body()
+        )
+
+        val approvedLogin = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79992220002", password = "strongpass123"))
+        }
+        assertEquals(HttpStatusCode.OK, approvedLogin.status)
+
+        val banResponse = client.post("/api/users/${targetUser.id}/ban") {
+            header(HttpHeaders.Authorization, "Bearer $adminToken")
+        }
+        assertEquals(HttpStatusCode.OK, banResponse.status)
+        assertEquals(
+            AdminUserResponse(
+                id = targetUser.id,
+                phone = targetUser.phone,
+                nickname = targetUser.nickname,
+                telegramId = targetUser.telegramId,
+                isAdmin = false,
+                isApproved = true,
+                isBanned = true
+            ),
+            banResponse.body()
+        )
+
+        val bannedLogin = client.post("/api/auth/login") {
+            contentType(ContentType.Application.Json)
+            setBody(LoginRequest(phone = "+79992220002", password = "strongpass123"))
+        }
+        assertEquals(HttpStatusCode.Forbidden, bannedLogin.status)
+        assertEquals("""{"message":"User is banned"}""", bannedLogin.bodyAsText())
+    }
+
+    @Test
     fun `device crud flow works with server configs for current user only`() = testApplication {
         environment {
             config = MapApplicationConfig()
@@ -228,6 +402,7 @@ class AuthApiTest {
         }
         val firstUser = userRepository.findByPhone("+79990000001")!!
         userRepository.updateIsAdmin(firstUser.id, true)
+        userRepository.updateApproval(firstUser.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -260,6 +435,7 @@ class AuthApiTest {
             contentType(ContentType.Application.Json)
             setBody(RegisterRequest(phone = "+79990000002", nickname = "second", password = "strongpass123", telegramId = 22L))
         }
+        userRepository.approveByPhone("+79990000002")
 
         val createResponse = client.post("/api/devices") {
             header(HttpHeaders.Authorization, "Bearer $token")
@@ -394,6 +570,7 @@ class AuthApiTest {
         }
         val user = userRepository.findByPhone("+79990000055")!!
         userRepository.updateIsAdmin(user.id, true)
+        userRepository.updateApproval(user.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -496,6 +673,7 @@ class AuthApiTest {
         }
         val user = userRepository.findByPhone("+79990000066")!!
         userRepository.updateIsAdmin(user.id, true)
+        userRepository.updateApproval(user.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -602,6 +780,7 @@ class AuthApiTest {
         }
         val user = userRepository.findByPhone("+79990000077")!!
         userRepository.updateIsAdmin(user.id, true)
+        userRepository.updateApproval(user.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -698,6 +877,7 @@ class AuthApiTest {
         }
         val adminUser = userRepository.findByPhone("+79990000100")!!
         userRepository.updateIsAdmin(adminUser.id, true)
+        userRepository.updateApproval(adminUser.id, true)
 
         val adminLoginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -729,6 +909,7 @@ class AuthApiTest {
             contentType(ContentType.Application.Json)
             setBody(RegisterRequest(phone = "+79990000101", nickname = "user", password = "strongpass123", telegramId = null))
         }
+        userRepository.approveByPhone("+79990000101")
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -806,6 +987,7 @@ class AuthApiTest {
         }
         val adminUser = userRepository.findByPhone("+79990000111")!!
         userRepository.updateIsAdmin(adminUser.id, true)
+        userRepository.updateApproval(adminUser.id, true)
 
         val loginResponse = client.post("/api/auth/login") {
             contentType(ContentType.Application.Json)
@@ -915,5 +1097,10 @@ class AuthApiTest {
             ),
             superKey = "test-super-key"
         )
+    }
+
+    private fun UserRepository.approveByPhone(phone: String) {
+        val user = findByPhone(phone) ?: error("User with phone $phone not found")
+        updateApproval(user.id, true)
     }
 }

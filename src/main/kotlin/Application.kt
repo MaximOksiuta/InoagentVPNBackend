@@ -267,6 +267,14 @@ fun Application.module(
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid phone or password"))
                     return@post
                 }
+                if (!user.isApproved) {
+                    call.respond(HttpStatusCode.Forbidden, ErrorResponse("User is not approved"))
+                    return@post
+                }
+                if (user.isBanned) {
+                    call.respond(HttpStatusCode.Forbidden, ErrorResponse("User is banned"))
+                    return@post
+                }
 
                 val token = jwtService.generateToken(user)
                 call.respond(
@@ -824,6 +832,78 @@ fun Application.module(
                 call.response.status(HttpStatusCode.NoContent)
             }
         }
+
+        route("/api/users") {
+            get("", {
+                description = "List users, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Users list"
+                        body<List<AdminUserResponse>> {
+                            description = "User records with moderation flags"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
+                call.respond(userRepository.listUsers().map { it.toAdminResponse() })
+            }
+
+            post("/{userId}/approve", {
+                description = "Approve one user, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Approved user"
+                        body<AdminUserResponse> {
+                            description = "Updated user"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@post
+                val userId = parsePositiveId(call.parameters["userId"], "User id")
+                val updated = userRepository.updateApproval(userId, true)
+                if (!updated) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                    return@post
+                }
+                val user = userRepository.findById(userId)
+                if (user == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                    return@post
+                }
+                call.respond(user.toAdminResponse())
+            }
+
+            post("/{userId}/ban", {
+                description = "Ban one user, available only to administrators"
+                securitySchemeNames("bearerAuth")
+                response {
+                    code(HttpStatusCode.OK) {
+                        description = "Banned user"
+                        body<AdminUserResponse> {
+                            description = "Updated user"
+                        }
+                    }
+                }
+            }) {
+                authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@post
+                val userId = parsePositiveId(call.parameters["userId"], "User id")
+                val updated = userRepository.updateBan(userId, true)
+                if (!updated) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                    return@post
+                }
+                val user = userRepository.findById(userId)
+                if (user == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                    return@post
+                }
+                call.respond(user.toAdminResponse())
+            }
+        }
     }
 }
 
@@ -1002,6 +1082,17 @@ data class CurrentUserResponse(
 )
 
 @Serializable
+data class AdminUserResponse(
+    val id: Long,
+    val phone: String,
+    val nickname: String,
+    val telegramId: Long?,
+    val isAdmin: Boolean,
+    val isApproved: Boolean,
+    val isBanned: Boolean
+)
+
+@Serializable
 data class CreateDeviceRequest(
     val name: String
 )
@@ -1100,13 +1191,13 @@ private suspend fun authenticateCurrentUser(
         if (appConfig.superKey.isBlank() || superKey != appConfig.superKey) {
             return null
         }
-        return userRepository.findByPhone(phoneFromHeader)
+        return userRepository.findByPhone(phoneFromHeader)?.takeIf(User::canAccessAccount)
     }
 
     val principal = call.principal<JWTPrincipal>()
     if (principal != null) {
         val phone = principal.payload.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
-        return userRepository.findByPhone(phone)
+        return userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
     }
 
     val bearerToken = call.request.headers["Authorization"]
@@ -1117,7 +1208,7 @@ private suspend fun authenticateCurrentUser(
 
     val decoded = runCatching { jwtService.verifier.verify(bearerToken) }.getOrNull() ?: return null
     val phone = decoded.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
-    return userRepository.findByPhone(phone)
+    return userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
 }
 
 private suspend fun authenticateAdmin(
@@ -1144,6 +1235,20 @@ private fun Device.toSummaryResponse(): DeviceResponse {
         name = name
     )
 }
+
+private fun User.toAdminResponse(): AdminUserResponse {
+    return AdminUserResponse(
+        id = id,
+        phone = phone,
+        nickname = nickname,
+        telegramId = telegramId,
+        isAdmin = isAdmin,
+        isApproved = isApproved,
+        isBanned = isBanned
+    )
+}
+
+private fun User.canAccessAccount(): Boolean = isApproved && !isBanned
 
 private fun Device.toDetailsResponse(
     links: List<DeviceServerConfig>,

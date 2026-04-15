@@ -64,6 +64,20 @@ class DatabaseFactory(
             connection.createStatement().use { statement ->
                 statement.executeUpdate("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''")
             }
+            columns = userTableColumns(connection)
+        }
+
+        if ("is_approved" !in columns) {
+            connection.createStatement().use { statement ->
+                statement.executeUpdate("ALTER TABLE users ADD COLUMN is_approved INTEGER NOT NULL DEFAULT 0")
+            }
+            columns = userTableColumns(connection)
+        }
+
+        if ("is_banned" !in columns) {
+            connection.createStatement().use { statement ->
+                statement.executeUpdate("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+            }
         }
 
         ensureDevicesTable(connection)
@@ -92,6 +106,8 @@ class DatabaseFactory(
                     nickname TEXT NOT NULL,
                     telegram_id INTEGER,
                     is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_approved INTEGER NOT NULL DEFAULT 0,
+                    is_banned INTEGER NOT NULL DEFAULT 0,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
