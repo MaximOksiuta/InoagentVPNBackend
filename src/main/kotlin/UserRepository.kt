@@ -15,6 +15,7 @@ data class User(
 )
 
 interface UserRepository {
+    fun sessionValid(userId: Long, issuedAt: Long): Boolean = true
     fun createUser(phone: String, nickname: String, telegramId: Long?, passwordHash: String, isAdmin: Boolean = false): User?
     fun listUsers(): List<User>
     fun findById(userId: Long): User?
@@ -27,6 +28,12 @@ interface UserRepository {
 class SqliteUserRepository(
     private val databaseFactory: DatabaseFactory
 ) : UserRepository {
+    override fun sessionValid(userId: Long, issuedAt: Long): Boolean = databaseFactory.connection().use { c ->
+        c.prepareStatement("SELECT changed_at FROM password_revocations WHERE user_id = ?").use { s ->
+            s.setLong(1, userId)
+            s.executeQuery().use { r -> !r.next() || issuedAt > r.getLong(1) }
+        }
+    }
 
     override fun createUser(phone: String, nickname: String, telegramId: Long?, passwordHash: String, isAdmin: Boolean): User? {
         val sql = """

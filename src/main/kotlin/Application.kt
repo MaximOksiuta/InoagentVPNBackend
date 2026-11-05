@@ -91,6 +91,7 @@ fun Application.module(
     configMutationGuard: DeviceConfigMutationGuard = DeviceConfigMutationGuard()
 ) {
     install(CallLogging)
+    val serverMonitor = ServerMonitor()
     install(CORS) {
         anyHost()
         allowMethod(HttpMethod.Options)
@@ -150,6 +151,21 @@ fun Application.module(
     }
 
     routing {
+        post("/api/auth/recovery/telegram") {
+            val key = call.request.headers["X-Super-Key"].orEmpty()
+            if (appConfig.superKey.isBlank() || !java.security.MessageDigest.isEqual(key.toByteArray(), appConfig.superKey.toByteArray())) {
+                call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials")); return@post
+            }
+            val request = call.receive<RecoveryRequest>()
+            require(request.telegramId > 0)
+            val ticket = withBlockingIo { PasswordRecovery(DatabaseFactory(appConfig.databasePath)).issue(request) }
+            call.respond(ticket)
+        }
+        post("/api/auth/recovery/reset") {
+            val request = call.receive<ResetPasswordRequest>()
+            withBlockingIo { PasswordRecovery(DatabaseFactory(appConfig.databasePath)).consume(request) }
+            call.respond(HealthResponse("ok"))
+        }
         route("/api.json") {
             openApiSpec()
         }
@@ -598,6 +614,7 @@ fun Application.module(
 
                 val result = withBlockingIo {
                     configMutationGuard.withServerLock(server.id) {
+                        require(serverRepository.listServers().any { it.id == server.id }) { "Сервер выведен из пула" }
                         val existingConfig = deviceServerRepository.findByDeviceAndServer(device.id, server.id)
                         if (existingConfig != null) {
                             return@withServerLock GenerateConfigResult.Conflict
@@ -731,6 +748,13 @@ fun Application.module(
         }
 
         route("/api/servers") {
+            get("/status") {
+                authenticateCurrentUser(call, userRepository, jwtService, appConfig) ?: run {
+                    call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials")); return@get
+                }
+                val statuses = withBlockingIo { serverRepository.listServers().parallelStream().map(serverMonitor::check).toList() }
+                call.respond(statuses)
+            }
             get("", {
                 description = "List servers for authenticated users"
                 securitySchemeNames("bearerAuth")
@@ -810,7 +834,7 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@get
                 val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
-                val server = withBlockingIo { serverRepository.findServer(serverId) }
+                val server = withBlockingIo { serverRepository.listServers().find { it.id == serverId } }
                 if (server == null) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@get
@@ -879,15 +903,8 @@ fun Application.module(
             }) {
                 authenticateAdmin(call, userRepository, jwtService, appConfig) ?: return@delete
                 val serverId = parsePositiveId(call.parameters["serverId"], "Server id")
-                val hasConfigs = withBlockingIo { deviceServerRepository.existsByServer(serverId) }
-                if (hasConfigs) {
-                    call.respond(
-                        HttpStatusCode.Conflict,
-                        ErrorResponse("Server cannot be deleted while device configs still reference it")
-                    )
-                    return@delete
-                }
-                val deleted = withBlockingIo { serverRepository.deleteServer(serverId) }
+                // Retire from the pool while retaining existing configs and peer access.
+                val deleted = withBlockingIo { configMutationGuard.withServerLock(serverId) { serverRepository.deleteServer(serverId) } }
                 if (!deleted) {
                     call.respond(HttpStatusCode.NotFound, ErrorResponse("Server not found"))
                     return@delete
@@ -1100,7 +1117,6 @@ private fun validateServerPayload(request: UpsertServerRequest) {
     require(request.interfaceName.isNotBlank()) { "Server interfaceName must not be blank" }
 }
 
-private fun normalizePhone(phone: String): String = phone.trim()
 
 private val PHONE_REGEX = Regex("^\\+[1-9][0-9]{10,14}$")
 
@@ -1155,6 +1171,7 @@ class JwtService(
             .withAudience(jwtConfig.audience)
             .withClaim("userId", user.id)
             .withClaim("phone", user.phone)
+            .withClaim("pwd", passwordFingerprint(user.passwordHash))
             .withIssuedAt(Date(now))
             .withExpiresAt(Date(now + jwtConfig.expiresInMs))
             .sign(algorithm)
@@ -1394,7 +1411,10 @@ private suspend fun authenticateCurrentUser(
     if (principal != null) {
         val phone = principal.payload.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
         return withBlockingIo {
-            userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
+            userRepository.findByPhone(phone)?.takeIf { user ->
+                val tag = principal.payload.getClaim("pwd").asString()
+                user.canAccessAccount() && if (tag != null) tag == passwordFingerprint(user.passwordHash) else userRepository.sessionValid(user.id, (principal.payload.issuedAt?.time ?: 0) / 1000)
+            }
         }
     }
 
@@ -1407,7 +1427,10 @@ private suspend fun authenticateCurrentUser(
     val decoded = runCatching { jwtService.verifier.verify(bearerToken) }.getOrNull() ?: return null
     val phone = decoded.getClaim("phone").asString()?.let(::normalizePhone) ?: return null
     return withBlockingIo {
-        userRepository.findByPhone(phone)?.takeIf(User::canAccessAccount)
+        userRepository.findByPhone(phone)?.takeIf { user ->
+            val tag = decoded.getClaim("pwd").asString()
+            user.canAccessAccount() && if (tag != null) tag == passwordFingerprint(user.passwordHash) else userRepository.sessionValid(user.id, (decoded.issuedAt?.time ?: 0) / 1000)
+        }
     }
 }
 

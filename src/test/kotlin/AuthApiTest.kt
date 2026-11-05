@@ -538,7 +538,7 @@ class AuthApiTest {
     }
 
     @Test
-    fun `server cannot be deleted while configs still reference it`() = testApplication {
+    fun `server is retired while existing configs are preserved`() = testApplication {
         environment {
             config = MapApplicationConfig()
         }
@@ -597,12 +597,10 @@ class AuthApiTest {
             header(HttpHeaders.Authorization, "Bearer $token")
         }
 
-        assertEquals(HttpStatusCode.Conflict, deleteResponse.status)
-        assertEquals(
-            """{"message":"Server cannot be deleted while device configs still reference it"}""",
-            deleteResponse.bodyAsText()
-        )
+        assertEquals(HttpStatusCode.NoContent, deleteResponse.status)
         assertTrue(serverRepository.findServer(server.id) != null)
+        assertTrue(serverRepository.listServers().none { it.id == server.id })
+        assertTrue(deviceServerRepository.findByDeviceAndServer(device.id, server.id) != null)
     }
 
     @Test

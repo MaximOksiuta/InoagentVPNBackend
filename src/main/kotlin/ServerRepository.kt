@@ -59,6 +59,7 @@ class SqliteServerRepository(
         val sql = """
             SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name
             FROM servers
+            WHERE archived = 0
             ORDER BY id ASC
         """.trimIndent()
 
@@ -123,8 +124,8 @@ class SqliteServerRepository(
 
     override fun deleteServer(serverId: Long): Boolean {
         val sql = """
-            DELETE FROM servers
-            WHERE id = ?
+            UPDATE servers SET archived = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND archived = 0
         """.trimIndent()
 
         return databaseFactory.connection().use { db ->
