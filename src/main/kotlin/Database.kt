@@ -19,6 +19,7 @@ class DatabaseFactory(
         connection().use { connection ->
             ensureUsersTable(connection)
             createServersTable(connection)
+            initializeWorkflowTables(connection)
             connection.createStatement().use { statement ->
                 statement.executeUpdate("CREATE TABLE IF NOT EXISTS password_resets (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)")
                 statement.executeUpdate("CREATE TABLE IF NOT EXISTS password_revocations (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, changed_at INTEGER NOT NULL)")

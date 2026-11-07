@@ -38,14 +38,16 @@ class SqliteServerRepository(
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """.trimIndent()
 
-        return databaseFactory.connection().use { db ->
+        return databaseFactory.transaction { db ->
             db.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS).use { statement ->
                 bindServer(statement, name, location, connection)
                 statement.executeUpdate()
                 statement.generatedKeys.use { keys ->
                     check(keys.next()) { "Failed to create server" }
+                    val serverId = keys.getLong(1)
+                    announceNewServer(db,serverId)
                     Server(
-                        id = keys.getLong(1),
+                        id = serverId,
                         name = name,
                         location = location,
                         connection = connection

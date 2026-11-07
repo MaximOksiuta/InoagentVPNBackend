@@ -38,6 +38,15 @@ data class AwgCreatedUser(
 )
 
 class AwgServerScripts(private val connection: AwgConnection) {
+    private var sharedClient: SSHClient? = null
+
+    /** One authenticated transport; SSH channels are short-lived, not the connection. */
+    fun <T> withConnection(action: (AwgServerScripts) -> T): T {
+        if (sharedClient != null) return action(this)
+        val client = connect()
+        sharedClient = client
+        try { return action(this) } finally { sharedClient = null; client.close() }
+    }
 
     private val wgConfigPath: String
         get() = "${connection.containerConfigDir}/${connection.interfaceName}.conf"
@@ -84,11 +93,17 @@ class AwgServerScripts(private val connection: AwgConnection) {
     }
 
     fun addUser(name: String, userId: Long? = null, deviceId: Long? = null): AwgCreatedUser {
+        if (sharedClient == null) return withConnection { it.addUser(name, userId, deviceId) }
         require(name.isNotBlank()) { "name must not be blank" }
 
         val state = readServerState()
-        val nextIp = getNextClientIp(state.subnetCidr, state.wgConfig)
-        val keys = generateClientKeys()
+        val recoveryPath = if (userId != null && deviceId != null) "${connection.containerConfigDir}/.inoagent/$userId-$deviceId.conf" else null
+        val recovered = recoveryPath?.let { readContainerFileOrEmpty(it) }.orEmpty()
+        val recoveredPrivate = recovered.lineSequence().firstOrNull { it.trim().startsWith("PrivateKey =") }?.substringAfter('=')?.trim()
+        val keys = if (recoveredPrivate != null) recoveredPrivate to AwgConfigClientIdExtractor.extractClientId(recovered) else generateClientKeys()
+        require(keys.second.isNotBlank()) { "Invalid saved client key" }
+        require(state.clientsTable.none { it.userId == userId && it.deviceId == deviceId && userId != null && deviceId != null && it.clientId != keys.second }) { "Device already has a remote peer; manual recovery required" }
+        val nextIp = parsePeerIps(state.wgConfig)[keys.second] ?: getNextClientIp(state.subnetCidr, state.wgConfig)
 
         val config = buildClientConfig(
             privateKey = keys.first,
@@ -101,13 +116,18 @@ class AwgServerScripts(private val connection: AwgConnection) {
             awgParams = state.awgParams
         )
 
+        // Persist an intent before changing the live peer. A retry reuses these keys.
+        if (recoveryPath != null) {
+            runDocker("mkdir -p ${shellQuote("${connection.containerConfigDir}/.inoagent")}")
+            writeContainerFile(recoveryPath, config)
+        }
         addPeerToServer(
             publicKey = keys.second,
             clientIp = nextIp,
             presharedKey = state.presharedKey
         )
 
-        val updatedTable = state.clientsTable + ClientsTableEntry(
+        val updatedTable = state.clientsTable.filterNot { it.clientId == keys.second } + ClientsTableEntry(
             clientId = keys.second,
             clientName = name,
             creationDate = java.util.Date().toString(),
@@ -115,7 +135,7 @@ class AwgServerScripts(private val connection: AwgConnection) {
             deviceId = deviceId
         )
         writeClientsTable(updatedTable)
-        reloadWireGuard()
+        // wg set already updates the live interface. Never tear it down for a new peer.
 
         return AwgCreatedUser(
             clientId = keys.second,
@@ -139,6 +159,9 @@ class AwgServerScripts(private val connection: AwgConnection) {
 
         val updatedTable = state.clientsTable.filterNot { it.clientId == clientId }
         writeClientsTable(updatedTable)
+        state.clientsTable.firstOrNull { it.clientId == clientId }?.let { entry ->
+            if (entry.userId != null && entry.deviceId != null) runDocker("rm -f ${shellQuote("${connection.containerConfigDir}/.inoagent/${entry.userId}-${entry.deviceId}.conf")}")
+        }
     }
 
     fun renameUser(clientId: String, newName: String) {
@@ -203,7 +226,7 @@ class AwgServerScripts(private val connection: AwgConnection) {
         ).trim()
 
         val parts = output.split("\n---\n")
-        require(parts.size == 2) { "Failed to generate client keys: $output" }
+        require(parts.size == 2) { "Failed to generate client keys" }
 
         val privateKey = parts[0].trim()
         val publicKey = parts[1].trim()
@@ -226,11 +249,8 @@ class AwgServerScripts(private val connection: AwgConnection) {
             append("AllowedIPs = ").append(clientIp).append("/32\n")
         }
 
-        runDocker("sh -lc ${shellQuote("echo ${shellQuote(peerBlock)} >> $wgConfigPath")}")
-    }
-
-    private fun reloadWireGuard() {
-        runDocker("sh -lc ${shellQuote("ip link del ${connection.interfaceName} 2>/dev/null || true; wg-quick up $wgConfigPath 2>&1")}")
+        val existing = readContainerFile(wgConfigPath)
+        writeContainerFile(wgConfigPath, removePeerFromConfig(existing, publicKey) + peerBlock)
     }
 
     private fun readContainerFile(path: String): String {
@@ -250,10 +270,13 @@ class AwgServerScripts(private val connection: AwgConnection) {
     private fun writeContainerFile(path: String, content: String) {
         val encoded = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
         val script = """
+            set -eu
+            umask 077
             cat <<'EOF' > /tmp/amnezia_payload.b64
             $encoded
             EOF
-            base64 -d /tmp/amnezia_payload.b64 > ${shellQuote(path)}
+            base64 -d /tmp/amnezia_payload.b64 > ${shellQuote("$path.tmp")}
+            mv ${shellQuote("$path.tmp")} ${shellQuote(path)}
             rm -f /tmp/amnezia_payload.b64
         """.trimIndent()
         runDocker("sh -lc ${shellQuote(script)}")
@@ -273,29 +296,27 @@ class AwgServerScripts(private val connection: AwgConnection) {
             append(command)
         }
 
-        val client = SSHClient()
-        client.addHostKeyVerifier(PromiscuousVerifier())
-
+        val client = sharedClient ?: connect()
         try {
-            client.connect(connection.host, connection.port)
-
-            if (!connection.sshKeyPath.isNullOrBlank()) {
-                client.authPublickey(connection.username, connection.sshKeyPath)
-            } else {
-                val password = connection.password ?: error("Either password or sshKeyPath must be provided")
-                client.authPassword(connection.username, password)
-            }
-
             client.startSession().use { session ->
                 return executeRemoteCommand(session, remoteCommand)
             }
         } finally {
-            try {
-                client.disconnect()
-            } finally {
-                client.close()
-            }
+            if (sharedClient == null) client.close()
         }
+    }
+
+    private fun connect(): SSHClient {
+        val client = SSHClient()
+        client.addHostKeyVerifier(PromiscuousVerifier())
+        client.connectTimeout = 10_000
+        client.timeout = 30_000
+        try {
+            client.connect(connection.host, connection.port)
+            if (!connection.sshKeyPath.isNullOrBlank()) client.authPublickey(connection.username, connection.sshKeyPath)
+            else client.authPassword(connection.username, connection.password ?: error("SSH credentials required"))
+            return client
+        } catch (error: Throwable) { client.close(); throw error }
     }
 
     private fun executeRemoteCommand(session: Session, command: String): String {

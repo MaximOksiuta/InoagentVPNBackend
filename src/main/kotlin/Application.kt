@@ -92,6 +92,9 @@ fun Application.module(
 ) {
     install(CallLogging)
     val serverMonitor = ServerMonitor()
+    val generationQueue = GenerationQueue(DatabaseFactory(appConfig.databasePath),userRepository,deviceRepository,deviceServerRepository,serverRepository,deviceConfigGenerator,configMutationGuard)
+    environment.monitor.subscribe(io.ktor.server.application.ApplicationStarted) { generationQueue.start() }
+    environment.monitor.subscribe(io.ktor.server.application.ApplicationStopping) { generationQueue.close() }
     install(CORS) {
         anyHost()
         allowMethod(HttpMethod.Options)
@@ -151,6 +154,7 @@ fun Application.module(
     }
 
     routing {
+        workflowRoutes(DatabaseFactory(appConfig.databasePath),generationQueue,appConfig.superKey) { authenticateCurrentUser(it,userRepository,jwtService,appConfig) }
         post("/api/auth/recovery/telegram") {
             val key = call.request.headers["X-Super-Key"].orEmpty()
             if (appConfig.superKey.isBlank() || !java.security.MessageDigest.isEqual(key.toByteArray(), appConfig.superKey.toByteArray())) {
@@ -545,7 +549,7 @@ fun Application.module(
 
                 val deletionStatus = withBlockingIo {
                     configMutationGuard.withServerLocks(
-                        serverIds = deviceServerRepository.listByDevice(device.id).map(DeviceServerConfig::serverId)
+                        serverIds = serverRepository.listServers().map(Server::id) + deviceServerRepository.listByDevice(device.id).map(DeviceServerConfig::serverId)
                     ) {
                         val linkedConfigs = deviceServerRepository.listByDevice(device.id)
                         linkedConfigs.forEach { config ->
@@ -1185,6 +1189,7 @@ data class GeneratedDeviceConfig(
 
 interface DeviceConfigGenerator {
     fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig
+    fun <T> withSession(server: Server, action: (DeviceConfigGenerator) -> T): T = action(this)
 }
 
 interface DeviceConfigCleanupService {
@@ -1219,6 +1224,15 @@ private sealed interface GenerateConfigResult {
 }
 
 class AwgDeviceConfigGenerator : DeviceConfigGenerator {
+    override fun <T> withSession(server: Server, action: (DeviceConfigGenerator) -> T): T =
+        AwgServerScripts(server.connection).withConnection { scripts ->
+            action(object : DeviceConfigGenerator {
+                override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
+                    val created = scripts.addUser(device.name, user.id, device.id)
+                    return GeneratedDeviceConfig(created.clientId, created.config)
+                }
+            })
+        }
     override fun generate(server: Server, user: User, device: Device): GeneratedDeviceConfig {
         val created = AwgServerScripts(server.connection).addUser(
             name = device.name,
