@@ -92,6 +92,13 @@ fun Application.module(
 ) {
     install(CallLogging)
     val serverMonitor = ServerMonitor()
+    val serverArtwork = ServerArtwork.forDatabase(appConfig.databasePath)
+    // Backfill active and archived names without changing existing server rows.
+    DatabaseFactory(appConfig.databasePath).connection().use { c ->
+        c.createStatement().use { s -> s.executeQuery("SELECT DISTINCT name FROM servers").use { r ->
+            while (r.next()) serverArtwork.ensure(r.getString(1))
+        } }
+    }
     val generationQueue = GenerationQueue(DatabaseFactory(appConfig.databasePath),userRepository,deviceRepository,deviceServerRepository,serverRepository,deviceConfigGenerator,configMutationGuard)
     environment.monitor.subscribe(io.ktor.server.application.ApplicationStarted) { generationQueue.start() }
     environment.monitor.subscribe(io.ktor.server.application.ApplicationStopping) { generationQueue.close() }
@@ -154,6 +161,20 @@ fun Application.module(
     }
 
     routing {
+        get("/api/server-art/{id}") {
+            val id = call.parameters["id"]?.toLongOrNull() ?: return@get call.respond(HttpStatusCode.NotFound)
+            val server = withBlockingIo { serverRepository.findServer(id) } ?: return@get call.respond(HttpStatusCode.NotFound)
+            val image = withBlockingIo { serverArtwork.ensure(server.name) }
+            call.response.headers.append(HttpHeaders.ETag, image.etag)
+            call.response.headers.append(HttpHeaders.CacheControl, "public, max-age=3600")
+            call.response.headers.append("X-Content-Type-Options", "nosniff")
+            call.response.headers.append("Content-Security-Policy", "default-src 'none'; style-src 'none'; sandbox")
+            if (call.request.headers[HttpHeaders.IfNoneMatch] == image.etag) {
+                call.respond(HttpStatusCode.NotModified)
+            } else {
+                call.respondBytes(withBlockingIo { java.nio.file.Files.readAllBytes(image.path) }, ContentType.parse("image/svg+xml"))
+            }
+        }
         workflowRoutes(DatabaseFactory(appConfig.databasePath),generationQueue,appConfig.superKey) { authenticateCurrentUser(it,userRepository,jwtService,appConfig) }
         post("/api/auth/recovery/telegram") {
             val key = call.request.headers["X-Super-Key"].orEmpty()
@@ -809,6 +830,7 @@ fun Application.module(
                 validateServerPayload(request)
 
                 val server = withBlockingIo {
+                    serverArtwork.ensure(request.name)
                     serverRepository.createServer(
                         name = request.name.trim(),
                         location = request.location.trim(),
@@ -876,6 +898,7 @@ fun Application.module(
                 validateServerPayload(request)
 
                 val updated = withBlockingIo {
+                    serverArtwork.ensure(request.name)
                     serverRepository.updateServer(
                         serverId = serverId,
                         name = request.name.trim(),
