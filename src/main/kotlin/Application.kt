@@ -92,6 +92,9 @@ fun Application.module(
 ) {
     install(CallLogging)
     val serverMonitor = ServerMonitor()
+    suspend fun monitoredServers(): List<ServerStatus> = withBlockingIo {
+        serverRepository.listServers().parallelStream().map(serverMonitor::check).toList()
+    }
     val serverArtwork = ServerArtwork.forDatabase(appConfig.databasePath)
     // Backfill active and archived names without changing existing server rows.
     DatabaseFactory(appConfig.databasePath).connection().use { c ->
@@ -175,7 +178,9 @@ fun Application.module(
                 call.respondBytes(withBlockingIo { java.nio.file.Files.readAllBytes(image.path) }, ContentType.parse("image/svg+xml"))
             }
         }
-        workflowRoutes(DatabaseFactory(appConfig.databasePath),generationQueue,appConfig.superKey) { authenticateCurrentUser(it,userRepository,jwtService,appConfig) }
+        workflowRoutes(DatabaseFactory(appConfig.databasePath), generationQueue, appConfig.superKey, ::monitoredServers) {
+            authenticateCurrentUser(it, userRepository, jwtService, appConfig)
+        }
         post("/api/auth/recovery/telegram") {
             val key = call.request.headers["X-Super-Key"].orEmpty()
             if (appConfig.superKey.isBlank() || !java.security.MessageDigest.isEqual(key.toByteArray(), appConfig.superKey.toByteArray())) {
@@ -777,8 +782,8 @@ fun Application.module(
                 authenticateCurrentUser(call, userRepository, jwtService, appConfig) ?: run {
                     call.respond(HttpStatusCode.Unauthorized, ErrorResponse("Invalid credentials")); return@get
                 }
-                val statuses = withBlockingIo { serverRepository.listServers().parallelStream().map(serverMonitor::check).toList() }
-                call.respond(statuses)
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.respond(monitoredServers())
             }
             get("", {
                 description = "List servers for authenticated users"

@@ -19,7 +19,7 @@ class WorkflowApiTest {
         fun user(phone:String,admin:Boolean=false):User {val u=users.createUser(phone,"Test",123,"hash",admin)!!;users.updateApproval(u.id,true);return users.findById(u.id)!!}
         val admin=user("+79991112233",true);val owner=user("+79991112234");val third=user("+79991112235")
         val a=devices.createDevice(admin.id,"Admin device");val b=devices.createDevice(owner.id,"My device")
-        val server=servers.createServer("New server","UK",AwgConnection("host",22,"root","pass"))
+        val server=servers.createServer("New server","UK",AwgConnection("127.0.0.1",22,"root","pass"))
         val privateConfig=configs.upsert(a.id,server.id,"SECRET_ADMIN_CONFIG")
         val jwt=JwtService(config.jwt);val ownerToken=jwt.generateToken(owner);val adminToken=jwt.generateToken(admin)
         val generator=object:DeviceConfigGenerator { override fun generate(server:Server,user:User,device:Device)=GeneratedDeviceConfig("key","USER_CONFIG_${user.id}") }
@@ -48,5 +48,16 @@ class WorkflowApiTest {
         val inbox=Json.decodeFromString(ListSerializer(ServerNotification.serializer()),request("/api/notifications").bodyAsText());assertEquals(1,inbox.size);assertFalse(inbox.single().read)
         assertEquals(HttpStatusCode.NoContent,client.post("/api/notifications/${inbox.single().id}/read"){header(HttpHeaders.Authorization,"Bearer $ownerToken")}.status)
         assertTrue(Json.decodeFromString(ListSerializer(ServerNotification.serializer()),request("/api/notifications").bodyAsText()).single().read)
+
+        val bannedAdmin = user("+79991112236", true)
+        users.updateBan(bannedAdmin.id, true)
+        users.createUser("+79991112237", "Pending admin", null, "hash", true)
+        assertEquals(HttpStatusCode.Unauthorized, request("/api/bot/server-monitoring").status)
+        val monitoring = client.get("/api/bot/server-monitoring") { header("X-Super-Key", "bot-secret") }
+        assertEquals(HttpStatusCode.OK, monitoring.status)
+        val snapshot = Json.decodeFromString<MonitoringSnapshot>(monitoring.bodyAsText())
+        assertEquals(listOf(MonitoringAdmin(admin.phone, admin.telegramId)), snapshot.admins)
+        assertEquals(server.id, snapshot.servers.single().id)
+        assertNull(snapshot.servers.single().probeUrl)
     }
 }

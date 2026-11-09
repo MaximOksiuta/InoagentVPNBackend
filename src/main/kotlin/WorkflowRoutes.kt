@@ -13,7 +13,19 @@ import kotlinx.serialization.Serializable
 @Serializable data class BotNotification(val id: Long,val serverId: Long,val serverName: String,val location: String,val phone: String,val telegramId: Long?)
 @Serializable data class DeliveryReport(val delivered: Boolean)
 
-fun Route.workflowRoutes(db: DatabaseFactory,queue: GenerationQueue,superKey: String,authenticate: suspend (ApplicationCall)->User?) {
+@Serializable
+data class MonitoringAdmin(val phone: String, val telegramId: Long?)
+
+@Serializable
+data class MonitoringSnapshot(val servers: List<ServerStatus>, val admins: List<MonitoringAdmin>)
+
+fun Route.workflowRoutes(
+    db: DatabaseFactory,
+    queue: GenerationQueue,
+    superKey: String,
+    readServerStatuses: suspend () -> List<ServerStatus>,
+    authenticate: suspend (ApplicationCall) -> User?
+) {
     val catalog=ConfigCatalog(db)
     suspend fun user(call: ApplicationCall): User? = authenticate(call).also { if(it==null) call.respond(HttpStatusCode.Unauthorized,ErrorResponse("Invalid credentials")) }
     suspend fun <T> io(action:()->T): T = withContext(Dispatchers.IO) { action() }
@@ -69,6 +81,27 @@ fun Route.workflowRoutes(db: DatabaseFactory,queue: GenerationQueue,superKey: St
         val id=call.parameters["id"]?.toLongOrNull() ?: return@post call.respond(HttpStatusCode.BadRequest)
         io { db.connection().use { c -> c.prepareStatement("UPDATE server_notifications SET read_at=? WHERE id=? AND user_id=?").use { s -> s.setLong(1,System.currentTimeMillis());s.setLong(2,id);s.setLong(3,owner.id);s.executeUpdate() } } }
         call.respond(HttpStatusCode.NoContent)
+    }
+    get("/api/bot/server-monitoring") {
+        if (!bot(call)) return@get
+        val admins = io {
+            db.connection().use { connection ->
+                connection.prepareStatement(
+                    "SELECT phone, telegram_id FROM users WHERE is_admin=1 AND is_approved=1 AND is_banned=0"
+                ).use { statement ->
+                    statement.executeQuery().use { rows ->
+                        buildList {
+                            while (rows.next()) {
+                                val telegramId = rows.getLong("telegram_id").takeUnless { rows.wasNull() }
+                                add(MonitoringAdmin(rows.getString("phone"), telegramId))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+        call.respond(MonitoringSnapshot(readServerStatuses(), admins))
     }
     get("/api/bot/notifications") {
         if(!bot(call)) return@get

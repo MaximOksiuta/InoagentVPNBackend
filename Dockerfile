@@ -20,6 +20,9 @@ RUN cp /app/build/init-admin-scripts/init_admin /app/build/install/kotlin/bin/in
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/build/install/kotlin /app
 
 RUN mkdir -p /app/data && useradd --system --create-home --uid 10001 appuser && chown -R appuser:appuser /app
