@@ -441,10 +441,16 @@ class AwgServerScripts(private val connection: AwgConnection) {
 
     private fun parseAwgParams(config: String): Map<String, String> {
         val params = linkedMapOf<String, String>()
-        val keys = listOf("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4")
+        val keys = listOf(
+            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4",
+            "I1", "I2", "I3", "I4", "I5", "HeaderProtectionKey", "ContentPaddingAddition",
+            "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout",
+            "MaxHandshakeAttempts", "RandomTrailers", "DisableCookies"
+        )
+        val interfaceConfig = config.lineSequence().takeWhile { !it.trim().equals("[Peer]", ignoreCase = true) }.joinToString("\n")
         for (key in keys) {
             val value = Regex("""^$key\s*=\s*(.+)$""", RegexOption.MULTILINE)
-                .find(config)
+                .find(interfaceConfig)
                 ?.groupValues
                 ?.get(1)
                 ?.trim()

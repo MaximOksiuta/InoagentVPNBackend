@@ -9,8 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
-@Serializable data class ServerNotification(val id: Long,val serverId: Long,val serverName: String,val location: String,val createdAt: Long,val read: Boolean)
-@Serializable data class BotNotification(val id: Long,val serverId: Long,val serverName: String,val location: String,val phone: String,val telegramId: Long?)
+@Serializable data class ServerNotification(val id: Long,val serverId: Long,val serverName: String,val location: String,val createdAt: Long,val read: Boolean,val comment: String? = null)
+@Serializable data class BotNotification(val id: Long,val serverId: Long,val serverName: String,val location: String,val phone: String,val telegramId: Long?,val comment: String? = null)
 @Serializable data class DeliveryReport(val delivered: Boolean)
 
 @Serializable
@@ -71,8 +71,8 @@ fun Route.workflowRoutes(
     post("/api/generation/jobs/{id}/retry") { val owner=user(call) ?: return@post;val job=io { queue.retry(owner,call.parameters["id"].orEmpty()) };if(job==null) call.respond(HttpStatusCode.NotFound) else call.respond(HttpStatusCode.Accepted,job) }
     get("/api/notifications") {
         val owner=user(call) ?: return@get
-        val rows=io { db.connection().use { c -> c.prepareStatement("SELECT n.*,s.name,s.location FROM server_notifications n JOIN servers s ON s.id=n.server_id WHERE n.user_id=? AND s.archived=0 ORDER BY n.created_at DESC LIMIT 100").use { s ->
-            s.setLong(1,owner.id);s.executeQuery().use { r -> buildList { while(r.next()) add(ServerNotification(r.getLong("id"),r.getLong("server_id"),r.getString("name"),r.getString("location"),r.getLong("created_at"),r.getObject("read_at")!=null)) } }
+        val rows=io { db.connection().use { c -> c.prepareStatement("SELECT n.*,s.name,s.location,s.notification_comment FROM server_notifications n JOIN servers s ON s.id=n.server_id WHERE n.user_id=? AND s.archived=0 ORDER BY n.created_at DESC LIMIT 100").use { s ->
+            s.setLong(1,owner.id);s.executeQuery().use { r -> buildList { while(r.next()) add(ServerNotification(r.getLong("id"),r.getLong("server_id"),r.getString("name"),r.getString("location"),r.getLong("created_at"),r.getObject("read_at")!=null,r.getString("notification_comment"))) } }
         } } }
         call.respond(rows)
     }
@@ -105,7 +105,7 @@ fun Route.workflowRoutes(
     }
     get("/api/bot/notifications") {
         if(!bot(call)) return@get
-        val rows=io { db.connection().use { c -> c.prepareStatement("SELECT n.id,n.server_id,s.name,s.location,u.phone,u.telegram_id FROM server_notifications n JOIN servers s ON s.id=n.server_id JOIN users u ON u.id=n.user_id WHERE n.delivered_at IS NULL AND n.attempts<10 AND n.retry_at<=? AND s.archived=0 AND u.is_approved=1 AND u.is_banned=0 ORDER BY n.created_at LIMIT 50").use { s -> s.setLong(1,System.currentTimeMillis());s.executeQuery().use { r -> buildList { while(r.next()) add(BotNotification(r.getLong("id"),r.getLong("server_id"),r.getString("name"),r.getString("location"),r.getString("phone"),r.getLong("telegram_id").takeUnless { r.wasNull() })) } } } } }
+        val rows=io { db.connection().use { c -> c.prepareStatement("SELECT n.id,n.server_id,s.name,s.location,u.phone,u.telegram_id,s.notification_comment FROM server_notifications n JOIN servers s ON s.id=n.server_id JOIN users u ON u.id=n.user_id WHERE n.delivered_at IS NULL AND n.attempts<10 AND n.retry_at<=? AND s.archived=0 AND u.is_approved=1 AND u.is_banned=0 ORDER BY n.created_at LIMIT 50").use { s -> s.setLong(1,System.currentTimeMillis());s.executeQuery().use { r -> buildList { while(r.next()) add(BotNotification(r.getLong("id"),r.getLong("server_id"),r.getString("name"),r.getString("location"),r.getString("phone"),r.getLong("telegram_id").takeUnless { r.wasNull() },r.getString("notification_comment"))) } } } } }
         call.response.headers.append(HttpHeaders.CacheControl,"no-store");call.respond(rows)
     }
     post("/api/bot/notifications/{id}/delivery") {

@@ -839,7 +839,8 @@ fun Application.module(
                     serverRepository.createServer(
                         name = request.name.trim(),
                         location = request.location.trim(),
-                        connection = request.toAwgConnection()
+                        connection = request.toAwgConnection(),
+                        notificationComment = request.notificationComment?.trim()
                     )
                 }
                 call.respond(HttpStatusCode.Created, server.toResponse())
@@ -908,7 +909,8 @@ fun Application.module(
                         serverId = serverId,
                         name = request.name.trim(),
                         location = request.location.trim(),
-                        connection = request.toAwgConnection()
+                        connection = request.toAwgConnection(),
+                        notificationComment = request.notificationComment?.trim()
                     )
                 }
                 if (updated == null) {
@@ -1139,6 +1141,7 @@ private fun parsePositiveId(rawValue: String?, label: String): Long {
 }
 
 private fun validateServerPayload(request: UpsertServerRequest) {
+    require((request.notificationComment?.trim()?.length ?: 0) <= 1000) { "Комментарий должен быть не длиннее 1000 символов" }
     require(request.name.isNotBlank()) { "Server name must not be blank" }
     require(request.location.isNotBlank()) { "Server location must not be blank" }
     require(request.host.isNotBlank()) { "Server host must not be blank" }
@@ -1393,7 +1396,8 @@ data class UpsertServerRequest(
     val sshKeyPath: String? = null,
     val containerName: String = "amnezia-awg2",
     val containerConfigDir: String = "/opt/amnezia/awg",
-    val interfaceName: String = "awg0"
+    val interfaceName: String = "awg0",
+    val notificationComment: String? = null
 )
 
 @Serializable
@@ -1408,7 +1412,8 @@ data class ServerResponse(
     val sshKeyPath: String?,
     val containerName: String,
     val containerConfigDir: String,
-    val interfaceName: String
+    val interfaceName: String,
+    val notificationComment: String? = null
 )
 
 @Serializable
@@ -1593,7 +1598,8 @@ private fun Server.toResponse(): ServerResponse {
         sshKeyPath = connection.sshKeyPath,
         containerName = connection.containerName,
         containerConfigDir = connection.containerConfigDir,
-        interfaceName = connection.interfaceName
+        interfaceName = connection.interfaceName,
+        notificationComment = notificationComment
     )
 }
 

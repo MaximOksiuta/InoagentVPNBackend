@@ -26,6 +26,9 @@ class DatabaseFactory(
                 val columns = mutableSetOf<String>()
                 statement.executeQuery("PRAGMA table_info(servers)").use { rs -> while (rs.next()) columns += rs.getString("name") }
                 if ("archived" !in columns) statement.executeUpdate("ALTER TABLE servers ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+                if ("notification_comment" !in columns) {
+                    statement.executeUpdate("ALTER TABLE servers ADD COLUMN notification_comment TEXT")
+                }
             }
         }
     }

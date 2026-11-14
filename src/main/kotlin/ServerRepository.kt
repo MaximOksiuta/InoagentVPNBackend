@@ -6,14 +6,15 @@ data class Server(
     val id: Long,
     val name: String,
     val location: String,
-    val connection: AwgConnection
+    val connection: AwgConnection,
+    val notificationComment: String? = null
 )
 
 interface ServerRepository {
-    fun createServer(name: String, location: String, connection: AwgConnection): Server
+    fun createServer(name: String, location: String, connection: AwgConnection, notificationComment: String? = null): Server
     fun listServers(): List<Server>
     fun findServer(serverId: Long): Server?
-    fun updateServer(serverId: Long, name: String, location: String, connection: AwgConnection): Server?
+    fun updateServer(serverId: Long, name: String, location: String, connection: AwgConnection, notificationComment: String? = null): Server?
     fun deleteServer(serverId: Long): Boolean
 }
 
@@ -21,7 +22,7 @@ class SqliteServerRepository(
     private val databaseFactory: DatabaseFactory
 ) : ServerRepository {
 
-    override fun createServer(name: String, location: String, connection: AwgConnection): Server {
+    override fun createServer(name: String, location: String, connection: AwgConnection, notificationComment: String?): Server {
         val sql = """
             INSERT INTO servers(
                 name,
@@ -33,14 +34,16 @@ class SqliteServerRepository(
                 ssh_key_path,
                 container_name,
                 container_config_dir,
-                interface_name
+                interface_name,
+                notification_comment
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """.trimIndent()
 
         return databaseFactory.transaction { db ->
             db.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS).use { statement ->
                 bindServer(statement, name, location, connection)
+                statement.setString(11, notificationComment?.takeIf { it.isNotEmpty() })
                 statement.executeUpdate()
                 statement.generatedKeys.use { keys ->
                     check(keys.next()) { "Failed to create server" }
@@ -50,7 +53,8 @@ class SqliteServerRepository(
                         id = serverId,
                         name = name,
                         location = location,
-                        connection = connection
+                        connection = connection,
+                        notificationComment = notificationComment?.takeIf { it.isNotEmpty() }
                     )
                 }
             }
@@ -59,7 +63,7 @@ class SqliteServerRepository(
 
     override fun listServers(): List<Server> {
         val sql = """
-            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name
+            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name, notification_comment
             FROM servers
             WHERE archived = 0
             ORDER BY id ASC
@@ -80,7 +84,7 @@ class SqliteServerRepository(
 
     override fun findServer(serverId: Long): Server? {
         val sql = """
-            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name
+            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name, notification_comment
             FROM servers
             WHERE id = ?
             LIMIT 1
@@ -96,7 +100,7 @@ class SqliteServerRepository(
         }
     }
 
-    override fun updateServer(serverId: Long, name: String, location: String, connection: AwgConnection): Server? {
+    override fun updateServer(serverId: Long, name: String, location: String, connection: AwgConnection, notificationComment: String?): Server? {
         val sql = """
             UPDATE servers
             SET
@@ -110,6 +114,7 @@ class SqliteServerRepository(
                 container_name = ?,
                 container_config_dir = ?,
                 interface_name = ?,
+                notification_comment = CASE WHEN ? IS NULL THEN notification_comment ELSE NULLIF(?, '') END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         """.trimIndent()
@@ -117,7 +122,9 @@ class SqliteServerRepository(
         return databaseFactory.transaction { db ->
             db.prepareStatement(sql).use { statement ->
                 bindServer(statement, name, location, connection)
-                statement.setLong(11, serverId)
+                statement.setString(11, notificationComment)
+                statement.setString(12, notificationComment)
+                statement.setLong(13, serverId)
                 val updatedRows = statement.executeUpdate()
                 if (updatedRows == 0) null else findServer(db, serverId)
             }
@@ -161,6 +168,7 @@ class SqliteServerRepository(
             id = getLong("id"),
             name = getString("name"),
             location = getString("location"),
+            notificationComment = getString("notification_comment"),
             connection = AwgConnection(
                 host = getString("host"),
                 port = getInt("port"),
@@ -176,7 +184,7 @@ class SqliteServerRepository(
 
     private fun findServer(connection: java.sql.Connection, serverId: Long): Server? {
         val sql = """
-            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name
+            SELECT id, name, location, host, port, username, password, ssh_key_path, container_name, container_config_dir, interface_name, notification_comment
             FROM servers
             WHERE id = ?
             LIMIT 1
